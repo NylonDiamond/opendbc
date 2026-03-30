@@ -30,6 +30,7 @@
 #define MSG_SUBARU_ES_LKAS_ANGLE         0x124U
 #define MSG_SUBARU_ES_Brake              0x220U
 #define MSG_SUBARU_ES_Distance           0x221U
+#define MSG_SUBARU_ES_Status             0x222U
 #define MSG_SUBARU_ES_DashStatus         0x321U
 #define MSG_SUBARU_ES_LKAS_State         0x322U
 #define MSG_SUBARU_ES_Infotainment       0x323U
@@ -59,7 +60,7 @@
   {.msg = {{MSG_SUBARU_Steering_Torque, SUBARU_MAIN_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
   {.msg = {{MSG_SUBARU_Wheel_Speeds,    alt_bus,         8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
   {.msg = {{MSG_SUBARU_Brake_Status,    alt_bus,         8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
-  {.msg = {{MSG_SUBARU_ES_Brake,        alt_bus,         8, 20U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
+  {.msg = {{MSG_SUBARU_ES_Status,       alt_bus,         8, 20U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
   {.msg = {{MSG_SUBARU_Steering_2,      SUBARU_MAIN_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
 
 static bool subaru_gen2 = false;
@@ -100,8 +101,8 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   }
 
   // enter controls on rising edge of ACC, exit controls on ACC off
-  if (subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_ES_Brake, alt_main_bus)) {
-    bool cruise_engaged = (msg->data[4] >> 7) & 1U;
+  if (subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_ES_Status, alt_main_bus)) {
+    bool cruise_engaged = (msg->data[3] >> 5) & 1U;
     pcm_cruise_check(cruise_engaged);
   }
   if (!subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_CruiseControl, alt_main_bus)) {
