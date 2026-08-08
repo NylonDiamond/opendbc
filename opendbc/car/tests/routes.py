@@ -26,6 +26,7 @@ non_tested_cars = [
   HYUNDAI.GENESIS_G90,
   VOLKSWAGEN.VOLKSWAGEN_CRAFTER_MK2,  # need a route from an ACC-equipped Crafter
   SUBARU.SUBARU_FORESTER_HYBRID,
+  SUBARU.SUBARU_CROSSTREK_2024,  # need a route with rlogs
   VOLKSWAGEN.PORSCHE_MACAN_MK1,
   HONDA.ACURA_TLX_2G,
 
