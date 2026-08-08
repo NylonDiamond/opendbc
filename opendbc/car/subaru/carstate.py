@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.subaru.values import DBC, CanBus, SubaruFlags
+from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags
 from opendbc.car import CanSignalRateCalculator
 
 
@@ -82,6 +82,13 @@ class CarState(CarStateBase):
 
     cp_cruise = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp
     cp_es_brake = cp_alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else cp_cam
+
+    # brake commanded by eyesight, for the UI. meaningless when openpilot controls long,
+    # since ES_Brake is then openpilot's own output echoed back. preglobal is excluded
+    # because its ES_Brake has a different layout and BRAKE_MAX does not apply to it.
+    if not (self.CP.flags & SubaruFlags.PREGLOBAL) and not self.CP.openpilotLongitudinalControl:
+      brake_pressure = cp_es_brake.vl["ES_Brake"]["Brake_Pressure"]
+      ret.stockBrakeCommand = min(1.0, max(0.0, brake_pressure / CarControllerParams.BRAKE_MAX))
 
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       # ES_Brake->Cruise_Activated stays high on brake at standstill,
