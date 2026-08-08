@@ -180,6 +180,7 @@ struct CarState {
   regenBraking @45 :Bool; # this is user pedal only
   parkingBrake @39 :Bool;
   brakeHoldActive @38 :Bool;
+  stockBrakeCommand @62 :Float32; # 0-1, brake commanded by the stock ADAS when openpilot is not controlling long
 
   # steering wheel
   steeringAngleDeg @7 :Float32;
