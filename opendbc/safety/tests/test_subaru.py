@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import enum
+import itertools
 import unittest
 import numpy as np
 
@@ -386,6 +387,120 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
                                                SubaruMsg.ES_Infotainment)}
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+
+
+class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
+  """MADS: lateral latches on the first ACC engage and only exits on the main switch.
+
+  Everything the non-MADS angle car does still applies, so this inherits the full angle
+  suite. Only the ACC-dropout behavior differs, and that override is below.
+  """
+  ALT_MAIN_BUS = SUBARU_ALT_BUS
+  FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE)
+  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
+                                               SubaruMsg.ES_Infotainment)}
+  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+
+  def setUp(self):
+    super().setUp()
+    # EyeSight main defaults on with the car running, so this is the resting state
+    self._rx(self._main_switch_msg(True))
+
+  def _main_switch_msg(self, on):
+    # the camera's own copy on the camera bus, not the one we transmit on the main bus
+    values = {"Cruise_On": on}
+    return self.packer.make_can_msg_safety("ES_DashStatus", SUBARU_CAM_BUS, values)
+
+  def _arm(self):
+    self._rx(self._main_switch_msg(True))
+    self._rx(self._pcm_status_msg(False))
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_disable_control_allowed_from_cruise(self):
+    # overrides the stock pcm behavior. ACC dropping out must NOT exit controls, that is
+    # the entire point of MADS
+    self._arm()
+    self._rx(self._pcm_status_msg(False))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_not_armed_before_first_engage(self):
+    # main on by itself steers nothing until the driver engages ACC once
+    for _ in range(100):
+      self._rx(self._main_switch_msg(True))
+      self._rx(self._pcm_status_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_latches_through_sustained_acc_dropout(self):
+    self._arm()
+    for _ in range(1000):
+      self._rx(self._pcm_status_msg(False))
+      self._rx(self._main_switch_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_main_switch_off_exits_controls(self):
+    self._arm()
+    self._rx(self._main_switch_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_main_switch_off_wins_over_engaged_acc(self):
+    # ACC held high while the main switch goes off must not keep or regain controls
+    self._arm()
+    self._rx(self._main_switch_msg(False))
+    for _ in range(100):
+      self._rx(self._pcm_status_msg(True))
+      self._rx(self._main_switch_msg(False))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_no_rearm_without_a_fresh_acc_edge(self):
+    # after a main switch cycle, ACC still held high is not a rising edge
+    self._arm()
+    self._rx(self._main_switch_msg(False))
+    self._rx(self._main_switch_msg(True))
+    for _ in range(100):
+      self._rx(self._pcm_status_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_rearm_after_main_switch_cycle(self):
+    self._arm()
+    self._rx(self._main_switch_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._main_switch_msg(True))
+    self._rx(self._pcm_status_msg(False))
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_no_arm_while_main_switch_off(self):
+    # a full ACC engage cycle with the main switch off must never allow controls
+    self._rx(self._main_switch_msg(False))
+    for _ in range(100):
+      self._rx(self._pcm_status_msg(False))
+      self._rx(self._pcm_status_msg(True))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_acc_main_on_tracks_the_signal(self):
+    for on in (True, False, True, False):
+      self._rx(self._main_switch_msg(on))
+      self.assertEqual(on, self.safety.get_acc_main_on())
+
+  def test_matches_the_openpilot_side_latch(self):
+    # carstate has to agree with controls_allowed or the panda's heartbeat check clears
+    # controls after 3s. exhaustive over every input sequence to depth 4
+    from opendbc.car.subaru.carstate import MadsLatch
+
+    inputs = list(itertools.product((False, True), repeat=2))
+    for seq in itertools.product(inputs, repeat=4):
+      with self.subTest(seq=seq):
+        self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+        self.safety.init_tests()
+        latch = MadsLatch()
+
+        for main_on, acc_enabled in seq:
+          self._rx(self._main_switch_msg(main_on))
+          self._rx(self._pcm_status_msg(acc_enabled))
+          self.assertEqual(latch.update(main_on, acc_enabled),
+                           self.safety.get_controls_allowed())
 
 
 if __name__ == "__main__":

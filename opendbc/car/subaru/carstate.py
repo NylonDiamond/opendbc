@@ -3,8 +3,33 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags, SubaruSafetyFlags
 from opendbc.car import CanSignalRateCalculator
+
+
+class MadsLatch:
+  """Mirrors the MADS latch in opendbc/safety/modes/subaru.h.
+
+  openpilot's engaged state and the panda's controls_allowed have to agree. If openpilot
+  reports disengaged while the panda still allows controls, the panda counts a heartbeat
+  mismatch and clears controls_allowed after 3 seconds, which looks like steering randomly
+  cutting out. test_subaru.py drives this and the C implementation with the same sequences
+  to keep them in step.
+  """
+
+  def __init__(self):
+    self.latched = False
+    self.acc_enabled_prev = False
+
+  def update(self, main_on: bool, acc_enabled: bool) -> bool:
+    # arm on the rising edge of ACC with the main switch on
+    if main_on and acc_enabled and not self.acc_enabled_prev:
+      self.latched = True
+    # the main switch is the only thing that exits
+    if not main_on:
+      self.latched = False
+    self.acc_enabled_prev = acc_enabled
+    return self.latched
 
 
 class CarState(CarStateBase):
@@ -14,6 +39,10 @@ class CarState(CarStateBase):
     self.shifter_values = can_define.dv["Transmission"]["Gear"]
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
+
+    # MADS is configured by openpilot as a safety param, so the panda and this agree on it
+    self.mads_enabled = bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS)
+    self.mads_latch = MadsLatch()
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -93,8 +122,14 @@ class CarState(CarStateBase):
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       # ES_Brake->Cruise_Activated stays high on brake at standstill,
       # so we use ES_Status->Cruise_Activated which is the correct engaged state.
-      ret.cruiseState.enabled = cp_es_brake.vl["ES_Status"]['Cruise_Activated'] != 0
-      ret.cruiseState.available = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
+      acc_enabled = cp_es_brake.vl["ES_Status"]['Cruise_Activated'] != 0
+      main_on = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
+      ret.cruiseState.available = main_on
+
+      if self.mads_enabled:
+        ret.cruiseState.enabled = self.mads_latch.update(main_on, acc_enabled)
+      else:
+        ret.cruiseState.enabled = acc_enabled
     elif self.CP.flags & SubaruFlags.HYBRID:
       # ES_Status is missing on hybrid, so we use ES_Brake instead
       # TODO: 0x27 and 0x225 on hybrids may work as a replacement
