@@ -397,6 +397,8 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
   """
   ALT_MAIN_BUS = SUBARU_ALT_BUS
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS
+  # whether the main switch arms on its own, so the shared tests below cover both variants
+  MADS_MAIN = False
   TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE)
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
                                                SubaruMsg.ES_Infotainment)}
@@ -560,8 +562,76 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
           self._rx(self._main_switch_msg(main_on))
           self._rx(self._pcm_status_msg(acc_enabled))
           self._rx(self._user_brake_msg(brake))
-          self.assertEqual(latch.update(main_on, acc_enabled),
+          self.assertEqual(latch.update(main_on, acc_enabled, self.MADS_MAIN),
                            self.safety.get_controls_allowed())
+
+
+class TestSubaruGen2AngleMadsMainSafety(TestSubaruGen2AngleMadsSafety):
+  """MADS with the main switch arming on its own, so no set speed is needed.
+
+  Everything the plain MADS car does still applies, including arming off ACC, so this
+  inherits the whole suite. Only the extra entry path differs.
+  """
+  FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS | SubaruSafetyFlags.MADS_MAIN
+  MADS_MAIN = True
+
+  def _arm(self):
+    # the whole point: a main switch tap, no ACC anywhere in the sequence
+    self._rx(self._main_switch_msg(False))
+    self._rx(self._main_switch_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_no_rearm_without_a_fresh_acc_edge(self):
+    # OVERRIDE: the base proves a main switch cycle alone cannot re-arm. here it is
+    # supposed to, so assert the opposite and keep the coverage rather than dropping it
+    self._arm()
+    self._rx(self._main_switch_msg(False))
+    self._rx(self._main_switch_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_the_switch_already_being_on_is_not_an_edge(self):
+    # the car starts with EyeSight main on, so the first message is not a driver action.
+    # arming there would land while openpilot is still initializing, and the panda would
+    # drop controls 3s later on heartbeat mismatch
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+    self.safety.init_tests()
+    for _ in range(100):
+      self._rx(self._main_switch_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_main_switch_tap_arms_without_acc(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+    self.safety.init_tests()
+    self._rx(self._main_switch_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._main_switch_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_acc_engage_still_arms(self):
+    # the ACC path is additive, not replaced
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+    self.safety.init_tests()
+    self._rx(self._main_switch_msg(True))
+    self._rx(self._pcm_status_msg(False))
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_main_switch_arming_needs_mads(self):
+    # the flag on its own must not turn a plain angle car into a main switch engage
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru,
+                                 SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS_MAIN)
+    self.safety.init_tests()
+    self._rx(self._main_switch_msg(False))
+    self._rx(self._main_switch_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_main_switch_arming_refused_with_openpilot_longitudinal(self):
+    # MADS is refused there, and this rides on MADS, so it has to go too
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS | SubaruSafetyFlags.LONG)
+    self.safety.init_tests()
+    self._rx(self._main_switch_msg(False))
+    self._rx(self._main_switch_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
 
 
 if __name__ == "__main__":

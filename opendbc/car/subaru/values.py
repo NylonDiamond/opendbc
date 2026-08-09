@@ -72,6 +72,7 @@ class SubaruSafetyFlags(IntFlag):
   PREGLOBAL_REVERSED_DRIVER_TORQUE = 4
   LKAS_ANGLE = 8
   MADS = 16
+  MADS_MAIN = 32
 
 
 def enable_mads(CP) -> None:
@@ -91,6 +92,23 @@ def is_mads_enabled(CP) -> bool:
   panda about whether controls are allowed.
   """
   return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS)
+
+
+def enable_mads_main(CP) -> None:
+  """Let the cruise main switch arm MADS on its own, without engaging ACC first.
+
+  Only meaningful on top of MADS, and the panda drops it without MADS anyway, so callers
+  are expected to set both or neither.
+  """
+  CP.safetyConfigs[0].safetyParam = int(CP.safetyConfigs[0].safetyParam | SubaruSafetyFlags.MADS_MAIN)
+
+
+def is_mads_main_enabled(CP) -> bool:
+  """Read the main switch arming path back off the safety param.
+
+  Same rule as is_mads_enabled: read it every time, never snapshot it.
+  """
+  return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS_MAIN)
 
 
 class SubaruFlags(IntFlag):
