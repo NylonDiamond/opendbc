@@ -197,6 +197,7 @@ struct CarState {
   stockAeb @30 :Bool;
   stockLkas @59 :Bool;
   stockFcw @31 :Bool;
+  stockCruiseEngaged @63 :Bool;  # stock ACC is actually engaged, regardless of any latch openpilot holds
   espDisabled @32 :Bool;
   accFaulted @42 :Bool;
   carFaultedNonCritical @47 :Bool;  # some ECU is faulted, but car remains controllable
