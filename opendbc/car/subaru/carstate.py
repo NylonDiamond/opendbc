@@ -129,6 +129,7 @@ class CarState(CarStateBase):
       main_on = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
       ret.cruiseState.available = main_on
 
+      ret.stockCruiseEngaged = acc_enabled
       if self.mads_enabled:
         ret.cruiseState.enabled = self.mads_latch.update(main_on, acc_enabled)
       else:
@@ -138,14 +139,23 @@ class CarState(CarStateBase):
       # TODO: 0x27 and 0x225 on hybrids may work as a replacement
       ret.cruiseState.enabled = cp_es_brake.vl["ES_Brake"]['Cruise_Activated'] != 0
       ret.cruiseState.available = cp_cam.vl["ES_DashStatus"]['Cruise_On'] != 0
+      ret.stockCruiseEngaged = ret.cruiseState.enabled
     else:
       ret.cruiseState.enabled = cp_cruise.vl["CruiseControl"]["Cruise_Activated"] != 0
       ret.cruiseState.available = cp_cruise.vl["CruiseControl"]["Cruise_On"] != 0
+      ret.stockCruiseEngaged = ret.cruiseState.enabled
     ret.cruiseState.speed = cp_cam.vl["ES_DashStatus"]["Cruise_Set_Speed"] * CV.KPH_TO_MS
 
     if (self.CP.flags & SubaruFlags.PREGLOBAL and cp.vl["Dash_State2"]["UNITS"] == 1) or \
        (not (self.CP.flags & SubaruFlags.PREGLOBAL) and cp.vl["Dashlights"]["UNITS"] == 1):
       ret.cruiseState.speed *= CV.MPH_TO_KPH
+
+    # the dash keeps its last set speed after ACC drops, so with MADS holding lateral the
+    # cluster would show a number nothing is acting on. report no set speed instead, which
+    # is what the driver needs to know: openpilot is steering and the pedals are theirs.
+    # only while engaged, so a disengaged openpilot still shows the speed ACC would resume at.
+    if self.mads_enabled and ret.cruiseState.enabled and not ret.stockCruiseEngaged:
+      ret.cruiseState.speed = 0.
 
     ret.seatbeltUnlatched = cp.vl["Dashlights"]["SEATBELT_FL"] == 1
     ret.doorOpen = any([cp.vl["BodyInfo"]["DOOR_OPEN_RR"],
