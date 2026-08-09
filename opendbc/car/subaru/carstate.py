@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags, SubaruSafetyFlags
+from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags, is_mads_enabled
 from opendbc.car import CanSignalRateCalculator
 
 
@@ -40,9 +40,12 @@ class CarState(CarStateBase):
 
     self.angle_rate_calulator = CanSignalRateCalculator(50)
 
-    # MADS is configured by openpilot as a safety param, so the panda and this agree on it
-    self.mads_enabled = bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS)
     self.mads_latch = MadsLatch()
+
+  @property
+  def mads_enabled(self) -> bool:
+    # MADS is configured by openpilot as a safety param, so the panda and this agree on it
+    return is_mads_enabled(self.CP)
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]

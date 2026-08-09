@@ -74,6 +74,25 @@ class SubaruSafetyFlags(IntFlag):
   MADS = 16
 
 
+def enable_mads(CP) -> None:
+  """Turn MADS on for an already fingerprinted car.
+
+  This runs after the interface is built, since whether MADS is wanted is openpilot's
+  call rather than the car's. int() because capnp rejects the IntFlag a bare |= produces.
+  """
+  CP.safetyConfigs[0].safetyParam = int(CP.safetyConfigs[0].safetyParam | SubaruSafetyFlags.MADS)
+
+
+def is_mads_enabled(CP) -> bool:
+  """Read MADS back off the safety param.
+
+  Always read it, never cache it: enable_mads runs after the interface exists, so anything
+  that snapshots this at construction gets a stale answer and ends up disagreeing with the
+  panda about whether controls are allowed.
+  """
+  return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS)
+
+
 class SubaruFlags(IntFlag):
   # Detected flags
   SEND_INFOTAINMENT = 1
