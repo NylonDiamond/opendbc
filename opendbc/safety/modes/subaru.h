@@ -73,6 +73,8 @@
 static bool subaru_gen2 = false;
 static bool subaru_lkas_angle = false;
 static bool subaru_mads = false;
+static bool subaru_mads_main = false;
+static bool subaru_main_on_prev = true;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -128,7 +130,18 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   // always exit controls on main switch off
   // Signal: ES_DashStatus.Cruise_On
   if (subaru_mads && msg_matches(msg, MSG_SUBARU_ES_DashStatus, SUBARU_CAM_BUS)) {
-    acc_main_on = GET_BIT(msg, 49U);
+    const bool main_on = GET_BIT(msg, 49U);
+    // with main switch arming on, switching cruise on is enough to enter controls. only on
+    // the rising edge, never held: re-asserting every message would defeat the heartbeat
+    // mismatch check that drops controls when openpilot stops reporting engaged.
+    // subaru_main_on_prev starts true so the switch already being on at power up is not an
+    // edge, which keeps this out of the window where openpilot is still initializing.
+    if (subaru_mads_main && main_on && !subaru_main_on_prev) {
+      controls_allowed = true;
+    }
+    subaru_main_on_prev = main_on;
+
+    acc_main_on = main_on;
     if (!acc_main_on) {
       controls_allowed = false;
     }
@@ -251,6 +264,7 @@ static safety_config subaru_init(uint16_t param) {
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
   const uint16_t SUBARU_PARAM_MADS = 16;
+  const uint16_t SUBARU_PARAM_MADS_MAIN = 32;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
@@ -261,8 +275,17 @@ static safety_config subaru_init(uint16_t param) {
   // MADS decouples steering from ACC, so it only applies to the angle cars we support it
   // on. it also holds controls through the brake, which must never happen while openpilot
   // owns longitudinal, so the combination is refused rather than trusted not to occur.
-  subaru_mads = subaru_lkas_angle && !subaru_longitudinal && GET_FLAG(param, SUBARU_PARAM_MADS);
+  // longitudinal is disabled above, but the param bit is still checked so the refusal
+  // holds when it comes back.
+  const uint16_t SUBARU_PARAM_LONGITUDINAL = 2;
+  const bool subaru_long_requested = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL);
+  subaru_mads = subaru_lkas_angle && !subaru_long_requested && GET_FLAG(param, SUBARU_PARAM_MADS);
   mads_enabled = subaru_mads;
+
+  // arming off the main switch alone is an extension of MADS, so it inherits those refusals
+  subaru_mads_main = subaru_mads && GET_FLAG(param, SUBARU_PARAM_MADS_MAIN);
+  // assume the switch is already on, which it is with the car running
+  subaru_main_on_prev = true;
 
   safety_config ret;
   if (subaru_lkas_angle && subaru_mads) {

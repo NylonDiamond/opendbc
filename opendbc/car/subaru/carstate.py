@@ -3,7 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags, is_mads_enabled
+from opendbc.car.subaru.values import DBC, CanBus, CarControllerParams, SubaruFlags, is_mads_enabled, is_mads_main_enabled
 from opendbc.car import CanSignalRateCalculator
 
 
@@ -20,15 +20,23 @@ class MadsLatch:
   def __init__(self):
     self.latched = False
     self.acc_enabled_prev = False
+    # EyeSight main is already on when the car starts, so the first message we ever see
+    # would otherwise look like a switch-on and arm during boot, before openpilot can
+    # engage. start out assuming it is on, so only a real off/on tap arms.
+    self.main_on_prev = True
 
-  def update(self, main_on: bool, acc_enabled: bool) -> bool:
+  def update(self, main_on: bool, acc_enabled: bool, main_engage: bool) -> bool:
     # arm on the rising edge of ACC with the main switch on
     if main_on and acc_enabled and not self.acc_enabled_prev:
+      self.latched = True
+    # with main switch arming on, switching cruise on is enough by itself, no set speed
+    if main_engage and main_on and not self.main_on_prev:
       self.latched = True
     # the main switch is the only thing that exits
     if not main_on:
       self.latched = False
     self.acc_enabled_prev = acc_enabled
+    self.main_on_prev = main_on
     return self.latched
 
 
@@ -46,6 +54,10 @@ class CarState(CarStateBase):
   def mads_enabled(self) -> bool:
     # MADS is configured by openpilot as a safety param, so the panda and this agree on it
     return is_mads_enabled(self.CP)
+
+  @property
+  def mads_main_enabled(self) -> bool:
+    return is_mads_main_enabled(self.CP)
 
   def update(self, can_parsers) -> structs.CarState:
     cp = can_parsers[Bus.pt]
@@ -131,7 +143,7 @@ class CarState(CarStateBase):
 
       ret.stockCruiseEngaged = acc_enabled
       if self.mads_enabled:
-        ret.cruiseState.enabled = self.mads_latch.update(main_on, acc_enabled)
+        ret.cruiseState.enabled = self.mads_latch.update(main_on, acc_enabled, self.mads_main_enabled)
       else:
         ret.cruiseState.enabled = acc_enabled
     elif self.CP.flags & SubaruFlags.HYBRID:
