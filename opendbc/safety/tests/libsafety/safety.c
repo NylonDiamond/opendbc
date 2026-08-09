@@ -34,6 +34,10 @@ void set_controls_allowed(bool c){
   controls_allowed = c;
 }
 
+void set_controls_allowed_lateral(bool c){
+  controls_allowed_lateral = c;
+}
+
 void set_alternative_experience(int mode){
   alternative_experience = mode;
 }
@@ -44,6 +48,10 @@ void set_relay_malfunction(bool c){
 
 bool get_controls_allowed(void){
   return controls_allowed;
+}
+
+bool get_controls_allowed_lateral(void){
+  return controls_allowed_lateral;
 }
 
 bool get_ignition_can(void){
@@ -88,10 +96,6 @@ bool get_vehicle_moving(void){
 
 bool get_acc_main_on(void){
   return acc_main_on;
-}
-
-bool get_mads_enabled(void){
-  return mads_enabled;
 }
 
 float get_vehicle_speed_min(void){

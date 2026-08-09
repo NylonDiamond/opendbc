@@ -120,6 +120,7 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
       // ACC held high across a main switch cycle cannot look like a fresh rising edge
       if (cruise_engaged && !cruise_engaged_prev && acc_main_on) {
         controls_allowed = true;
+        controls_allowed_lateral = true;
       }
       cruise_engaged_prev = cruise_engaged;
     } else {
@@ -138,12 +139,14 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
     // edge, which keeps this out of the window where openpilot is still initializing.
     if (subaru_mads_main && main_on && !subaru_main_on_prev) {
       controls_allowed = true;
+      controls_allowed_lateral = true;
     }
     subaru_main_on_prev = main_on;
 
     acc_main_on = main_on;
     if (!acc_main_on) {
       controls_allowed = false;
+      controls_allowed_lateral = false;
     }
   }
   if (!subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_CruiseControl, alt_main_bus)) {
@@ -273,14 +276,14 @@ static safety_config subaru_init(uint16_t param) {
   // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
 
   // MADS decouples steering from ACC, so it only applies to the angle cars we support it
-  // on. it also holds controls through the brake, which must never happen while openpilot
-  // owns longitudinal, so the combination is refused rather than trusted not to occur.
+  // on. openpilot longitudinal stays refused, but as a scope limit rather than a safety
+  // necessity: a brake press drops controls_allowed and every longitudinal command with
+  // it, and only controls_allowed_lateral survives, so the combination would be sound.
   // longitudinal is disabled above, but the param bit is still checked so the refusal
   // holds when it comes back.
   const uint16_t SUBARU_PARAM_LONGITUDINAL = 2;
   const bool subaru_long_requested = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL);
   subaru_mads = subaru_lkas_angle && !subaru_long_requested && GET_FLAG(param, SUBARU_PARAM_MADS);
-  mads_enabled = subaru_mads;
 
   // arming off the main switch alone is an extension of MADS, so it inherits those refusals
   subaru_mads_main = subaru_mads && GET_FLAG(param, SUBARU_PARAM_MADS_MAIN);
