@@ -43,6 +43,7 @@ const int MAX_WRONG_COUNTERS = 5;
 
 // This can be set by the safety hooks
 bool controls_allowed = false;
+bool controls_allowed_lateral = false; // steering only, survives a driver brake press
 bool relay_malfunction = false;
 bool gas_pressed = false;
 bool gas_pressed_prev = false;
@@ -57,7 +58,6 @@ struct sample_t vehicle_speed;
 struct sample_t vehicle_speed_2;
 bool vehicle_moving = false;
 bool acc_main_on = false;  // referred to as "ACC off" in ISO 15622:2018
-bool mads_enabled = false; // lateral stays engaged through a driver brake press
 int cruise_button_prev = 0;
 bool safety_rx_checks_invalid = false;
 
@@ -104,6 +104,7 @@ static bool is_msg_valid(RxCheck addr_list[], int index) {
     if (!addr_list[index].status.valid_checksum || !addr_list[index].status.valid_quality_flag || (addr_list[index].status.wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
       controls_allowed = false;
+      controls_allowed_lateral = false;
     }
   }
   return valid;
@@ -331,6 +332,7 @@ void safety_tick(const safety_config *cfg) {
       cfg->rx_checks[i].status.lagging = lagging;
       if (lagging) {
         controls_allowed = false;
+        controls_allowed_lateral = false;
       }
 
       // enforce minimum frequency for safety-relevant messages
@@ -338,6 +340,7 @@ void safety_tick(const safety_config *cfg) {
       if (lagging || frequency_invalid || !is_msg_valid(cfg->rx_checks, i)) {
         rx_checks_invalid = true;
         controls_allowed = false;
+        controls_allowed_lateral = false;
       }
     }
   }
@@ -352,23 +355,36 @@ static void relay_malfunction_set(void) {
 static void generic_rx_checks(void) {
   gas_pressed_prev = gas_pressed;
 
+  const bool driver_braking = brake_pressed || regen_braking;
+  const bool driver_braking_prev = brake_pressed_prev || regen_braking_prev;
+
   // exit controls on rising edge of brake press
-  // MADS holds lateral through the brake, which is only sound because a mode may not set
-  // mads_enabled while it controls longitudinal. braking must always drop longitudinal.
-  if (!mads_enabled && brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
+  if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
     controls_allowed = false;
   }
   brake_pressed_prev = brake_pressed;
 
   // exit controls on rising edge of regen paddle
-  if (!mads_enabled && regen_braking && (!regen_braking_prev || vehicle_moving)) {
+  if (regen_braking && (!regen_braking_prev || vehicle_moving)) {
     controls_allowed = false;
   }
   regen_braking_prev = regen_braking;
 
+  // MADS keeps steering alive on controls_allowed_lateral through the press above, so hand
+  // longitudinal authority back once the driver is off both pedals. edge triggered and
+  // never re-asserted: holding it high every message would let the panda's heartbeat check
+  // clear it and this restore it right back, defeating the timeout. gated on
+  // controls_allowed_lateral, which no mode without MADS ever sets, so no other car can
+  // have controls handed back here.
+  if (controls_allowed_lateral && driver_braking_prev && !driver_braking) {
+    controls_allowed = true;
+  }
+
   // exit controls on rising edge of steering override/disengage
+  // this one ends lateral as well. a driver taking the wheel is not MADS holding a lane.
   if (steering_disengage && !steering_disengage_prev) {
     controls_allowed = false;
+    controls_allowed_lateral = false;
   }
   steering_disengage_prev = steering_disengage;
 }
@@ -441,7 +457,6 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   cruise_engaged_prev = false;
   vehicle_moving = false;
   acc_main_on = false;
-  mads_enabled = false;
   cruise_button_prev = 0;
   desired_torque_last = 0;
   rt_torque_last = 0;
@@ -467,6 +482,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   reset_sample(&curvature_state.meas);
 
   controls_allowed = false;
+  controls_allowed_lateral = false;
   relay_malfunction_reset();
   safety_rx_checks_invalid = false;
 
@@ -553,5 +569,8 @@ void speed_mismatch_check(const float speed_2) {
   bool is_invalid_speed = SAFETY_ABS(speed_2 - ((float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR)) > MAX_SPEED_DELTA;
   if (is_invalid_speed) {
     controls_allowed = false;
+    // angle limits are speed scaled, so a bad speed is a lateral problem before it is a
+    // longitudinal one. MADS must not hold steering through it.
+    controls_allowed_lateral = false;
   }
 }

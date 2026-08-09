@@ -254,6 +254,7 @@ void safety_tick(const safety_config *safety_config);
 
 // This can be set by the safety hooks
 extern bool controls_allowed;
+extern bool controls_allowed_lateral; // steering only, survives a driver brake press
 extern bool relay_malfunction;
 extern bool gas_pressed;
 extern bool gas_pressed_prev;
@@ -268,7 +269,6 @@ extern struct sample_t vehicle_speed;
 extern struct sample_t vehicle_speed_2;
 extern bool vehicle_moving;
 extern bool acc_main_on; // referred to as "ACC off" in ISO 15622:2018
-extern bool mads_enabled; // lateral stays engaged through a driver brake press
 extern int cruise_button_prev;
 extern bool safety_rx_checks_invalid;
 

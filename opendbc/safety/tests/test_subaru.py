@@ -420,26 +420,68 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
 
-  def test_allow_user_brake_at_zero_speed(self):
-    # OVERRIDE: the base asserts a brake rising edge exits controls. holding lateral
-    # through the brake is the whole point of MADS, so it must not.
-    self._arm()
-    self._rx(self._vehicle_moving_msg(0))
+  def _assert_brake_holds_lateral_only(self):
     for _ in range(3):
       self._rx(self._user_brake_msg(1))
-      self.assertTrue(self.safety.get_controls_allowed())
+      # the brake takes longitudinal authority away exactly as it does on a stock car
+      self.assertFalse(self.safety.get_controls_allowed())
+      # and lane centering carries on regardless, which is the point of MADS
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
       self._rx(self._user_brake_msg(0))
+      # released, longitudinal authority comes back
       self.assertTrue(self.safety.get_controls_allowed())
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_allow_user_brake_at_zero_speed(self):
+    # OVERRIDE: the base asserts a brake rising edge exits controls entirely. under MADS it
+    # exits longitudinal only, and controls_allowed_lateral carries the steering.
+    self._arm()
+    self._rx(self._vehicle_moving_msg(0))
+    self._assert_brake_holds_lateral_only()
 
   def test_not_allow_user_brake_when_moving(self):
     # OVERRIDE: same, and at speed, which is the case that faulted the EPS on the road
     self._arm()
     self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
-    for _ in range(3):
-      self._rx(self._user_brake_msg(1))
-      self.assertTrue(self.safety.get_controls_allowed())
-      self._rx(self._user_brake_msg(0))
-      self.assertTrue(self.safety.get_controls_allowed())
+    self._assert_brake_holds_lateral_only()
+
+  def test_brake_blocks_longitudinal_while_lateral_holds(self):
+    # the reason controls_allowed_lateral exists. ES_Distance is the only longitudinal
+    # message this car can transmit, and a held brake must refuse it even though steering
+    # is still live. an inactive-throttle cancel stays allowed, that is a decel request.
+    self._arm()
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._user_brake_msg(1))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+  def test_steering_still_tx_while_braking(self):
+    # the other half: the steering command itself must still be accepted through the brake
+    self._arm()
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._user_brake_msg(1))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, True)))
+
+  def test_brake_release_does_not_rearm_a_disarmed_car(self):
+    # the re-sync is gated on controls_allowed_lateral so a brake release can never hand
+    # controls back to a car that was not holding lateral in the first place
+    self._rx(self._main_switch_msg(True))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._rx(self._user_brake_msg(1))
+    self._rx(self._user_brake_msg(0))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_rx_lag_exits_lateral(self):
+    # and so must a stale rx check, which is what safety_tick enforces
+    self._arm()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_timer(10_000_000)
+    self.safety.safety_tick_current_safety_config()
+    self.assertFalse(self.safety.safety_config_valid())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
   def test_brake_still_exits_controls_without_mads(self):
     # the gate in generic_rx_checks is global, so prove it is genuinely per mode and that
@@ -453,17 +495,16 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
     self.assertFalse(self.safety.get_controls_allowed())
 
   def test_mads_does_not_leak_into_another_safety_mode(self):
-    # mads_enabled is global. subaru_init reassigns it every time, so only a switch to a
-    # brand that never mentions MADS can expose a missing reset. that car would silently
-    # stop disengaging on the brake, including cars where openpilot owns longitudinal.
+    # controls_allowed_lateral is global and only subaru ever sets it, so a missing reset
+    # in set_safety_hooks would leave another brand steering on a flag it never granted.
     self._arm()
-    self.assertTrue(self.safety.get_mads_enabled())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
     self.safety.set_safety_hooks(CarParams.SafetyModel.toyota, 0)
     self.safety.init_tests()
-    self.assertFalse(self.safety.get_mads_enabled())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
   def test_mads_refused_with_openpilot_longitudinal(self):
-    # holding controls through the brake is only sound for a lateral-only car
+    # a scope limit rather than a safety necessity now, but still refused
     self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS | SubaruSafetyFlags.LONG)
     self.safety.init_tests()
     self._rx(self._main_switch_msg(True))
@@ -540,14 +581,17 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
       self.assertEqual(on, self.safety.get_acc_main_on())
 
   def test_matches_the_openpilot_side_latch(self):
-    # carstate has to agree with controls_allowed or the panda's heartbeat check clears
+    # carstate has to agree with the panda about lateral or the heartbeat check clears
     # controls after 3s. worse, openpilot keeps commanding an angle the panda refuses to
     # send, the EPS sees the LKAS stream stop mid-engagement and latches a steer fault.
     #
-    # brake is in the sequence precisely because it is not an input to MadsLatch: this is
-    # what proves the C side ignores it too. the earlier version of this test drove only
-    # main_on and acc_enabled, so it passed while generic_rx_checks was silently clearing
-    # controls on every brake press.
+    # MadsLatch is openpilot's lateral latch, so controls_allowed_lateral is what it has to
+    # match. brake is in the sequence precisely because it is not an input to MadsLatch:
+    # this is what proves the lateral flag ignores it too. an earlier version compared
+    # against controls_allowed, which only worked while mads_enabled suppressed the brake.
+    #
+    # controls_allowed is pinned in the same loop, since the brake dropping it and the
+    # release restoring it is the whole behavior this change introduces.
     from opendbc.car.subaru.carstate import MadsLatch
 
     inputs = list(itertools.product((False, True), repeat=3))
@@ -562,8 +606,9 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
           self._rx(self._main_switch_msg(main_on))
           self._rx(self._pcm_status_msg(acc_enabled))
           self._rx(self._user_brake_msg(brake))
-          self.assertEqual(latch.update(main_on, acc_enabled, self.MADS_MAIN),
-                           self.safety.get_controls_allowed())
+          lateral = latch.update(main_on, acc_enabled, self.MADS_MAIN)
+          self.assertEqual(lateral, self.safety.get_controls_allowed_lateral())
+          self.assertEqual(lateral and not brake, self.safety.get_controls_allowed())
 
 
 class TestSubaruGen2AngleMadsMainSafety(TestSubaruGen2AngleMadsSafety):

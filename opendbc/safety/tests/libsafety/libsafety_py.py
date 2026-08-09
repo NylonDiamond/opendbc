@@ -63,6 +63,8 @@ int set_safety_hooks(uint16_t mode, uint16_t param);
 
 void set_controls_allowed(bool c);
 bool get_controls_allowed(void);
+void set_controls_allowed_lateral(bool c);
+bool get_controls_allowed_lateral(void);
 bool get_longitudinal_allowed(void);
 void set_alternative_experience(int mode);
 int get_alternative_experience(void);
@@ -74,7 +76,6 @@ bool get_brake_pressed_prev(void);
 bool get_regen_braking_prev(void);
 bool get_steering_disengage_prev(void);
 bool get_acc_main_on(void);
-bool get_mads_enabled(void);
 float get_vehicle_speed_min(void);
 float get_vehicle_speed_max(void);
 int get_current_safety_mode(void);
