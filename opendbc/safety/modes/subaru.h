@@ -254,11 +254,15 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
-  // MADS decouples steering from ACC, so it only applies to the angle cars we support it on
-  subaru_mads = subaru_lkas_angle && GET_FLAG(param, SUBARU_PARAM_MADS);
 
   // TODO: re-enable once more work is done on the limits
   // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
+
+  // MADS decouples steering from ACC, so it only applies to the angle cars we support it
+  // on. it also holds controls through the brake, which must never happen while openpilot
+  // owns longitudinal, so the combination is refused rather than trusted not to occur.
+  subaru_mads = subaru_lkas_angle && !subaru_longitudinal && GET_FLAG(param, SUBARU_PARAM_MADS);
+  mads_enabled = subaru_mads;
 
   safety_config ret;
   if (subaru_lkas_angle && subaru_mads) {
