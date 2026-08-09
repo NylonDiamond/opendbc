@@ -418,6 +418,59 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
 
+  def test_allow_user_brake_at_zero_speed(self):
+    # OVERRIDE: the base asserts a brake rising edge exits controls. holding lateral
+    # through the brake is the whole point of MADS, so it must not.
+    self._arm()
+    self._rx(self._vehicle_moving_msg(0))
+    for _ in range(3):
+      self._rx(self._user_brake_msg(1))
+      self.assertTrue(self.safety.get_controls_allowed())
+      self._rx(self._user_brake_msg(0))
+      self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_not_allow_user_brake_when_moving(self):
+    # OVERRIDE: same, and at speed, which is the case that faulted the EPS on the road
+    self._arm()
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    for _ in range(3):
+      self._rx(self._user_brake_msg(1))
+      self.assertTrue(self.safety.get_controls_allowed())
+      self._rx(self._user_brake_msg(0))
+      self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_brake_still_exits_controls_without_mads(self):
+    # the gate in generic_rx_checks is global, so prove it is genuinely per mode and that
+    # a plain angle car is unaffected
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru,
+                                 SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(True)
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._user_brake_msg(1))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_mads_does_not_leak_into_another_safety_mode(self):
+    # mads_enabled is global. subaru_init reassigns it every time, so only a switch to a
+    # brand that never mentions MADS can expose a missing reset. that car would silently
+    # stop disengaging on the brake, including cars where openpilot owns longitudinal.
+    self._arm()
+    self.assertTrue(self.safety.get_mads_enabled())
+    self.safety.set_safety_hooks(CarParams.SafetyModel.toyota, 0)
+    self.safety.init_tests()
+    self.assertFalse(self.safety.get_mads_enabled())
+
+  def test_mads_refused_with_openpilot_longitudinal(self):
+    # holding controls through the brake is only sound for a lateral-only car
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS | SubaruSafetyFlags.LONG)
+    self.safety.init_tests()
+    self._rx(self._main_switch_msg(True))
+    self._rx(self._pcm_status_msg(False))
+    self._rx(self._pcm_status_msg(True))
+    self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
+    self._rx(self._user_brake_msg(1))
+    self.assertFalse(self.safety.get_controls_allowed())
+
   def test_disable_control_allowed_from_cruise(self):
     # overrides the stock pcm behavior. ACC dropping out must NOT exit controls, that is
     # the entire point of MADS
@@ -486,19 +539,27 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
 
   def test_matches_the_openpilot_side_latch(self):
     # carstate has to agree with controls_allowed or the panda's heartbeat check clears
-    # controls after 3s. exhaustive over every input sequence to depth 4
+    # controls after 3s. worse, openpilot keeps commanding an angle the panda refuses to
+    # send, the EPS sees the LKAS stream stop mid-engagement and latches a steer fault.
+    #
+    # brake is in the sequence precisely because it is not an input to MadsLatch: this is
+    # what proves the C side ignores it too. the earlier version of this test drove only
+    # main_on and acc_enabled, so it passed while generic_rx_checks was silently clearing
+    # controls on every brake press.
     from opendbc.car.subaru.carstate import MadsLatch
 
-    inputs = list(itertools.product((False, True), repeat=2))
-    for seq in itertools.product(inputs, repeat=4):
+    inputs = list(itertools.product((False, True), repeat=3))
+    for seq in itertools.product(inputs, repeat=3):
       with self.subTest(seq=seq):
         self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
         self.safety.init_tests()
+        self._rx(self._vehicle_moving_msg(self.STANDSTILL_THRESHOLD + 1))
         latch = MadsLatch()
 
-        for main_on, acc_enabled in seq:
+        for main_on, acc_enabled, brake in seq:
           self._rx(self._main_switch_msg(main_on))
           self._rx(self._pcm_status_msg(acc_enabled))
+          self._rx(self._user_brake_msg(brake))
           self.assertEqual(latch.update(main_on, acc_enabled),
                            self.safety.get_controls_allowed())
 

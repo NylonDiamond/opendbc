@@ -57,6 +57,7 @@ struct sample_t vehicle_speed;
 struct sample_t vehicle_speed_2;
 bool vehicle_moving = false;
 bool acc_main_on = false;  // referred to as "ACC off" in ISO 15622:2018
+bool mads_enabled = false; // lateral stays engaged through a driver brake press
 int cruise_button_prev = 0;
 bool safety_rx_checks_invalid = false;
 
@@ -352,13 +353,15 @@ static void generic_rx_checks(void) {
   gas_pressed_prev = gas_pressed;
 
   // exit controls on rising edge of brake press
-  if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
+  // MADS holds lateral through the brake, which is only sound because a mode may not set
+  // mads_enabled while it controls longitudinal. braking must always drop longitudinal.
+  if (!mads_enabled && brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
     controls_allowed = false;
   }
   brake_pressed_prev = brake_pressed;
 
   // exit controls on rising edge of regen paddle
-  if (regen_braking && (!regen_braking_prev || vehicle_moving)) {
+  if (!mads_enabled && regen_braking && (!regen_braking_prev || vehicle_moving)) {
     controls_allowed = false;
   }
   regen_braking_prev = regen_braking;
@@ -438,6 +441,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   cruise_engaged_prev = false;
   vehicle_moving = false;
   acc_main_on = false;
+  mads_enabled = false;
   cruise_button_prev = 0;
   desired_torque_last = 0;
   rt_torque_last = 0;

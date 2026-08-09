@@ -102,6 +102,10 @@ bool get_acc_main_on(void){
   return acc_main_on;
 }
 
+bool get_mads_enabled(void){
+  return mads_enabled;
+}
+
 float get_vehicle_speed_min(void){
   return vehicle_speed.min / VEHICLE_SPEED_FACTOR;
 }
