@@ -63,8 +63,16 @@
   {.msg = {{MSG_SUBARU_ES_Status,       alt_bus,         8, 20U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
   {.msg = {{MSG_SUBARU_Steering_2,      SUBARU_MAIN_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
 
+/* MADS additionally needs the main switch, which is only carried by the camera's own
+   ES_DashStatus on the camera bus. The copy we transmit on the main bus is our own output,
+   so it cannot be used to decide whether controls are allowed. */
+#define SUBARU_LKAS_ANGLE_MADS_RX_CHECKS(alt_bus)                                                                                               \
+  SUBARU_LKAS_ANGLE_RX_CHECKS(alt_bus)                                                                                                          \
+  {.msg = {{MSG_SUBARU_ES_DashStatus,   SUBARU_CAM_BUS,  8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
+
 static bool subaru_gen2 = false;
 static bool subaru_lkas_angle = false;
+static bool subaru_mads = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -103,7 +111,27 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   // enter controls on rising edge of ACC, exit controls on ACC off
   if (subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_ES_Status, alt_main_bus)) {
     bool cruise_engaged = (msg->data[3] >> 5) & 1U;
-    pcm_cruise_check(cruise_engaged);
+    if (subaru_mads) {
+      // latch on the rising edge of ACC and hold through an ACC dropout. the main switch
+      // below is the only thing that exits controls.
+      // cruise_engaged_prev is deliberately left tracking when the main switch is off, so
+      // ACC held high across a main switch cycle cannot look like a fresh rising edge
+      if (cruise_engaged && !cruise_engaged_prev && acc_main_on) {
+        controls_allowed = true;
+      }
+      cruise_engaged_prev = cruise_engaged;
+    } else {
+      pcm_cruise_check(cruise_engaged);
+    }
+  }
+
+  // always exit controls on main switch off
+  // Signal: ES_DashStatus.Cruise_On
+  if (subaru_mads && msg_matches(msg, MSG_SUBARU_ES_DashStatus, SUBARU_CAM_BUS)) {
+    acc_main_on = GET_BIT(msg, 49U);
+    if (!acc_main_on) {
+      controls_allowed = false;
+    }
   }
   if (!subaru_lkas_angle && msg_matches(msg, MSG_SUBARU_CruiseControl, alt_main_bus)) {
     bool cruise_engaged = (msg->data[5] >> 1) & 1U;
@@ -222,15 +250,27 @@ static safety_config subaru_init(uint16_t param) {
 
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
+  const uint16_t SUBARU_PARAM_MADS = 16;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
+  // MADS decouples steering from ACC, so it only applies to the angle cars we support it on
+  subaru_mads = subaru_lkas_angle && GET_FLAG(param, SUBARU_PARAM_MADS);
 
   // TODO: re-enable once more work is done on the limits
   // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
 
   safety_config ret;
-  if (subaru_lkas_angle) {
+  if (subaru_lkas_angle && subaru_mads) {
+    static RxCheck subaru_lkas_angle_mads_rx_checks[] = {
+      SUBARU_LKAS_ANGLE_MADS_RX_CHECKS(SUBARU_MAIN_BUS)
+    };
+    static RxCheck subaru_lkas_angle_gen2_mads_rx_checks[] = {
+      SUBARU_LKAS_ANGLE_MADS_RX_CHECKS(SUBARU_ALT_BUS)
+    };
+    ret = subaru_gen2 ? BUILD_SAFETY_CFG(subaru_lkas_angle_gen2_mads_rx_checks, SUBARU_LKAS_ANGLE_GEN2_TX_MSGS) : \
+                        BUILD_SAFETY_CFG(subaru_lkas_angle_mads_rx_checks, SUBARU_LKAS_ANGLE_TX_MSGS);
+  } else if (subaru_lkas_angle) {
     static RxCheck subaru_lkas_angle_rx_checks[] = {
       SUBARU_LKAS_ANGLE_RX_CHECKS(SUBARU_MAIN_BUS)
     };
