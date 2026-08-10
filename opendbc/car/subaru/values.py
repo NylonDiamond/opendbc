@@ -265,7 +265,10 @@ class CAR(Platforms):
   )
   SUBARU_CROSSTREK_2024 = SubaruGen2PlatformConfig(
     [SubaruCarDocs("Subaru Crosstrek 2024", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
-    CarSpecs(mass=1529, wheelbase=2.5781, steerRatio=13),
+    # Wilderness: 3369 lb curb, 104.9 in wheelbase, and the standard rack rather than the
+    # quick-ratio dual-pinion one the other trims get. 13 came from a quick-ratio car, and
+    # the learner climbs to ~15.3 against the short wheelbase to make up the difference.
+    CarSpecs(mass=1528, wheelbase=2.665, steerRatio=14.8),
     flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_CROSSTREK_2025 = SubaruGen2PlatformConfig(
