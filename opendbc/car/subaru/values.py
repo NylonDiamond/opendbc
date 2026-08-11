@@ -268,7 +268,8 @@ class CAR(Platforms):
     # Wilderness: 3369 lb curb, 104.9 in wheelbase, and the standard rack rather than the
     # quick-ratio dual-pinion one the other trims get. 13 came from a quick-ratio car, and
     # the learner climbs to ~15.3 against the short wheelbase to make up the difference.
-    CarSpecs(mass=1528, wheelbase=2.665, steerRatio=14.8),
+    # 15.2 is where the learner settles on highway data, not the 14.8 the trim chart implies
+    CarSpecs(mass=1528, wheelbase=2.665, steerRatio=15.2),
     flags=SubaruFlags.LKAS_ANGLE,
   )
   SUBARU_CROSSTREK_2025 = SubaruGen2PlatformConfig(

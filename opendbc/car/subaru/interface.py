@@ -48,6 +48,12 @@ class CarInterface(CarInterfaceBase):
     if ret.flags & SubaruFlags.LKAS_ANGLE:
       ret.steerControlType = structs.CarParams.SteerControlType.angle
 
+      if candidate == CAR.SUBARU_CROSSTREK_2024:
+        # this is only a seed: lagd starts at steerActuatorDelay + 0.2 and learns from there.
+        # Measured lag on this car is 0.202 s over 660 s of highway data, so 0.0 puts the seed
+        # on the answer instead of 50 percent above it.
+        ret.steerActuatorDelay = 0.0
+
     elif candidate == CAR.SUBARU_ASCENT:
       ret.steerActuatorDelay = 0.3  # end-to-end angle controller
       ret.lateralTuning.init('pid')
