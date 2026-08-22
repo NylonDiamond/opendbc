@@ -50,6 +50,9 @@ class CarState(CarStateBase):
 
     self.mads_latch = MadsLatch()
 
+    # stays None on cars whose camera never sends the duplicate alert message
+    self.es_lkas_alert_msg = None
+
   @property
   def mads_enabled(self) -> bool:
     # MADS is configured by openpilot as a safety param, so the panda and this agree on it
@@ -187,6 +190,14 @@ class CarState(CarStateBase):
                      (cp_cam.vl["ES_LKAS_State"]["LKAS_Alert"] == 2)
 
       self.es_lkas_state_msg = copy.copy(cp_cam.vl["ES_LKAS_State"])
+
+      # Not every camera sends the duplicate alert message, so only claim it once one has
+      # actually arrived. ts_nanos stays 0 until the first receipt, and sending a fabricated
+      # copy on a car that never had it would put a message on the bus that does not belong.
+      # vl has to be read first: it registers the message with the parser, ts_nanos does not.
+      es_lkas_alert = cp_cam.vl["ES_LKAS_Alert"]
+      if cp_cam.ts_nanos["ES_LKAS_Alert"]["LKAS_Alert_Msg"] != 0:
+        self.es_lkas_alert_msg = copy.copy(es_lkas_alert)
       self.es_brake_msg = copy.copy(cp_es_brake.vl["ES_Brake"])
 
       # TODO: Hybrid cars don't have ES_Distance, need a replacement

@@ -28,6 +28,7 @@ class SubaruMsg(enum.IntEnum):
   ES_DashStatus     = 0x321
   ES_LKAS_State     = 0x322
   ES_Infotainment   = 0x323
+  ES_LKAS_Alert     = 0x3C4
   ES_UDS_Request    = 0x787
   ES_HighBeamAssist = 0x22A
   ES_STATIC_1       = 0x325
@@ -39,12 +40,15 @@ SUBARU_ALT_BUS  = 1
 SUBARU_CAM_BUS  = 2
 
 
-def lkas_tx_msgs(alt_bus, lkas_msg=SubaruMsg.ES_LKAS):
-  return [[lkas_msg,                    SUBARU_MAIN_BUS],
+def lkas_tx_msgs(alt_bus, lkas_msg=SubaruMsg.ES_LKAS, lkas_alert=False):
+  msgs = [[lkas_msg,                    SUBARU_MAIN_BUS],
           [SubaruMsg.ES_Distance,       alt_bus],
           [SubaruMsg.ES_DashStatus,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_LKAS_State,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_Infotainment,   SUBARU_MAIN_BUS]]
+  if lkas_alert:
+    msgs.append([SubaruMsg.ES_LKAS_Alert, SUBARU_MAIN_BUS])
+  return msgs
 
 
 def long_tx_msgs(alt_bus):
@@ -59,8 +63,16 @@ def gen2_long_additional_tx_msgs():
           [SubaruMsg.ES_STATIC_2,       SUBARU_MAIN_BUS]]
 
 
-def fwd_blacklisted_addr(lkas_msg=SubaruMsg.ES_LKAS):
-  return {SUBARU_CAM_BUS: [lkas_msg, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State, SubaruMsg.ES_Infotainment]}
+def fwd_blacklisted_addr(lkas_msg=SubaruMsg.ES_LKAS, lkas_alert=False):
+  addrs = [lkas_msg, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State, SubaruMsg.ES_Infotainment]
+  if lkas_alert:
+    addrs.append(SubaruMsg.ES_LKAS_Alert)
+  return {SUBARU_CAM_BUS: addrs}
+
+
+# LKAS_ANGLE cars additionally replace the camera's duplicate alert message
+ANGLE_RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
+                                                   SubaruMsg.ES_Infotainment, SubaruMsg.ES_LKAS_Alert)}
 
 
 class TestSubaruSafetyBase(common.CarSafetyTest):
@@ -374,19 +386,17 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
 
 class TestSubaruGen1AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
   FLAGS = SubaruSafetyFlags.LKAS_ANGLE
-  TX_MSGS = lkas_tx_msgs(SUBARU_MAIN_BUS, SubaruMsg.ES_LKAS_ANGLE)
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment)}
-  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+  TX_MSGS = lkas_tx_msgs(SUBARU_MAIN_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+  RELAY_MALFUNCTION_ADDRS = ANGLE_RELAY_MALFUNCTION_ADDRS
+  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
 
 
 class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
   ALT_MAIN_BUS = SUBARU_ALT_BUS
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE)
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment)}
-  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+  RELAY_MALFUNCTION_ADDRS = ANGLE_RELAY_MALFUNCTION_ADDRS
+  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
 
 
 class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
@@ -399,10 +409,9 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS
   # whether the main switch arms on its own, so the shared tests below cover both variants
   MADS_MAIN = False
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE)
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment)}
-  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+  RELAY_MALFUNCTION_ADDRS = ANGLE_RELAY_MALFUNCTION_ADDRS
+  FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
 
   def setUp(self):
     super().setUp()

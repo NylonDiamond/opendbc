@@ -34,6 +34,7 @@
 #define MSG_SUBARU_ES_DashStatus         0x321U
 #define MSG_SUBARU_ES_LKAS_State         0x322U
 #define MSG_SUBARU_ES_Infotainment       0x323U
+#define MSG_SUBARU_ES_LKAS_Alert         0x3C4U
 
 #define MSG_SUBARU_ES_UDS_Request        0x787U
 
@@ -50,6 +51,12 @@
   {MSG_SUBARU_ES_DashStatus,     SUBARU_MAIN_BUS, 8, .check_relay = true},  \
   {MSG_SUBARU_ES_LKAS_State,     SUBARU_MAIN_BUS, 8, .check_relay = true},  \
   {MSG_SUBARU_ES_Infotainment,   SUBARU_MAIN_BUS, 8, .check_relay = true},  \
+
+/* The camera on LKAS_ANGLE cars repeats its LKAS alert on a second address. openpilot has
+   to replace that one too, so the stock "Keep hands on wheel" nag stays off the dash while
+   openpilot is steering. Cameras that never send it simply have nothing to block. */
+#define SUBARU_LKAS_ALERT_TX_MSGS() \
+  {MSG_SUBARU_ES_LKAS_Alert,     SUBARU_MAIN_BUS, 8, .check_relay = true},  \
 
 #define SUBARU_COMMON_TX_MSGS(alt_bus) \
   {MSG_SUBARU_ES_Distance, alt_bus, 8, .check_relay = false}, \
@@ -311,11 +318,13 @@ static safety_config subaru_init(uint16_t param) {
   static const CanMsg SUBARU_LKAS_ANGLE_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
     SUBARU_COMMON_TX_MSGS(SUBARU_MAIN_BUS)
+    SUBARU_LKAS_ALERT_TX_MSGS()
   };
 
   static const CanMsg SUBARU_LKAS_ANGLE_GEN2_TX_MSGS[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    SUBARU_LKAS_ALERT_TX_MSGS()
   };
 
   static RxCheck subaru_rx_checks[] = {
