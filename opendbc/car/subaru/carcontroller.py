@@ -126,6 +126,11 @@ class CarController(CarControllerBase):
         if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
           can_sends.append(subarucan.create_es_infotainment(self.packer, self.frame // 10, CS.es_infotainment_msg, hud_control.visualAlert))
 
+        # the panda blocks the camera's own copy, so this has to replace it or the dash
+        # loses the alert message entirely. only sent once we have seen one to copy
+        if CS.es_lkas_alert_msg is not None:
+          can_sends.append(subarucan.create_es_lkas_alert(self.packer, self.frame // 10, CS.es_lkas_alert_msg, hud_control.visualAlert))
+
       if self.CP.openpilotLongitudinalControl:
         if self.frame % 5 == 0:
           can_sends.append(subarucan.create_es_status(self.packer, self.frame // 5, CS.es_status_msg,

@@ -1,9 +1,14 @@
 import unittest
 
+from opendbc.can import CANPacker, CANParser
 from opendbc.car.car_helpers import interfaces
+from opendbc.car.structs import CarControl
+from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.carstate import MadsLatch
 from opendbc.car.subaru.values import CAR, SubaruSafetyFlags, enable_mads, enable_mads_main, is_mads_enabled, is_mads_main_enabled
+
+VisualAlert = CarControl.HUDControl.VisualAlert
 
 
 class TestSubaruMads(unittest.TestCase):
@@ -135,3 +140,64 @@ class TestSubaruFingerprint(unittest.TestCase):
         fw_size = len(fws[0])
         for fw in fws:
           assert len(fw) == fw_size, f"{platform} {ecu}: {len(fw)} {fw_size}"
+
+
+class TestSubaruLkasAlert(unittest.TestCase):
+  """The camera repeats its LKAS alert on ES_LKAS_Alert, which carries nothing else.
+
+  ES_LKAS_State is filtered but the dash reads this copy too, so the stock "Keep hands on
+  wheel" nag survives unless both are cleared. Byte values here are taken from a 2024
+  Crosstrek: LKAS_Alert_State reads 4 for as long as a message is up, so it has to go with it.
+  """
+  DBC = "subaru_global_2017_generated"
+
+  def setUp(self):
+    self.packer = CANPacker(self.DBC)
+    self.parser = CANParser(self.DBC, [("ES_LKAS_Alert", 0)], 0)
+
+  def _build(self, alert_msg, alert=0, state=0, signal2=0, visual_alert=VisualAlert.none):
+    camera = {"CHECKSUM": 0, "COUNTER": 0, "Signal1": 0, "LKAS_Alert": alert,
+              "LKAS_Alert_Msg": alert_msg, "LKAS_Alert_State": state,
+              "Signal2": signal2, "Signal3": 0}
+    msg = subarucan.create_es_lkas_alert(self.packer, 0, camera, visual_alert)
+    self.parser.update([0, [msg]])
+    return self.parser.vl["ES_LKAS_Alert"]
+
+  def test_hands_on_wheel_is_cleared(self):
+    for alert_msg in (1, 7):
+      with self.subTest(alert_msg=alert_msg):
+        out = self._build(alert_msg, state=4)
+        self.assertEqual(out["LKAS_Alert_Msg"], 0)
+        self.assertEqual(out["LKAS_Alert_State"], 0)
+
+  def test_audible_nag_is_cleared(self):
+    for alert in (27, 28, 30):
+      with self.subTest(alert=alert):
+        self.assertEqual(self._build(7, alert=alert, state=4)["LKAS_Alert"], 0)
+
+  def test_unrelated_alerts_pass_through(self):
+    # 25 is Audio_Lead_Car_Change, nothing to do with hands on wheel
+    out = self._build(0, alert=25, state=2, signal2=1)
+    self.assertEqual(out["LKAS_Alert"], 25)
+    self.assertEqual(out["LKAS_Alert_State"], 2)
+    self.assertEqual(out["Signal2"], 1)
+
+  def test_pre_collision_braking_is_not_filtered(self):
+    # 6 is Pre_Collision_Braking, which the driver needs to see
+    out = self._build(6, state=4)
+    self.assertEqual(out["LKAS_Alert_Msg"], 6)
+    self.assertEqual(out["LKAS_Alert_State"], 4)
+
+  def test_openpilot_can_raise_its_own_hands_on_wheel(self):
+    out = self._build(0, visual_alert=VisualAlert.steerRequired)
+    self.assertEqual(out["LKAS_Alert_Msg"], 1)
+    self.assertEqual(out["LKAS_Alert_State"], 4)
+
+  def test_counter_advances_and_checksum_is_valid(self):
+    camera = {"CHECKSUM": 0, "COUNTER": 0, "Signal1": 0, "LKAS_Alert": 0,
+              "LKAS_Alert_Msg": 0, "LKAS_Alert_State": 0, "Signal2": 0, "Signal3": 0}
+    for frame in range(20):
+      addr, dat, _ = subarucan.create_es_lkas_alert(self.packer, frame, camera, VisualAlert.none)
+      dat = bytes(dat)
+      self.assertEqual(dat[1] & 0xF, frame % 0x10)
+      self.assertEqual(dat[0], (addr % 256 + addr // 256 + sum(dat[1:])) & 0xFF)
