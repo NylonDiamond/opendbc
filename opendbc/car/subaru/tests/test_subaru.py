@@ -1,12 +1,16 @@
 import unittest
+from types import SimpleNamespace
 
 from opendbc.can import CANPacker, CANParser
+from opendbc.car import Bus
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.structs import CarControl
 from opendbc.car.subaru import subarucan
+from opendbc.car.subaru.carcontroller import CarController, RESUME_MAX_ATTEMPTS, RESUME_MIN_HOLD_FRAMES, RESUME_PULSE_SENDS
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.carstate import MadsLatch
-from opendbc.car.subaru.values import CAR, SubaruSafetyFlags, enable_mads, enable_mads_main, is_mads_enabled, is_mads_main_enabled
+from opendbc.car.subaru.values import CAR, DBC, SubaruSafetyFlags, enable_auto_resume, enable_mads, enable_mads_main, \
+                                      is_auto_resume_enabled, is_mads_enabled, is_mads_main_enabled
 
 VisualAlert = CarControl.HUDControl.VisualAlert
 
@@ -201,3 +205,147 @@ class TestSubaruLkasAlert(unittest.TestCase):
       dat = bytes(dat)
       self.assertEqual(dat[1] & 0xF, frame % 0x10)
       self.assertEqual(dat[0], (addr % 256 + addr // 256 + sum(dat[1:])) & 0xFF)
+
+
+class TestSubaruAutoResume(unittest.TestCase):
+  """Auto resume out of EyeSight's HOLD state.
+
+  The trigger has to be tight in both directions. Too eager and the car pulls into an
+  intersection on its own; too shy and the driver keeps tapping the gas anyway. Numbers here
+  come off a real resume: the gap sat in a +/- 0.2 m noise band while stopped, and the lead
+  gained 0.5 m about 0.7 s before the driver reached for the button.
+  """
+  PLATFORM = CAR.SUBARU_CROSSTREK_2024
+
+  def setUp(self):
+    self.CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    enable_auto_resume(self.CP)
+    self.CC = CarController(None, self.CP)
+
+  @staticmethod
+  def _state(close_distance, car_follow=True, hold=True, standstill=True, acc=True,
+             brake=False, gas=False, enabled=True):
+    out = SimpleNamespace(standstill=standstill, stockCruiseEngaged=acc, brakePressed=brake,
+                          gasPressed=gas, cruiseState=SimpleNamespace(standstill=hold))
+    CS = SimpleNamespace(out=out, es_distance_msg={"Close_Distance": close_distance, "Car_Follow": car_follow})
+    return SimpleNamespace(enabled=enabled), CS
+
+  def _run(self, frames, close_distance, **kwargs):
+    """Step the controller and return how many resume messages it asked for."""
+    sends = 0
+    for _ in range(frames):
+      dist = close_distance(self.CC.frame) if callable(close_distance) else close_distance
+      CC, CS = self._state(dist, **kwargs)
+      sends += self.CC._update_auto_resume(CC, CS)
+      self.CC.frame += 1
+    return sends
+
+  def test_resumes_once_the_lead_pulls_away(self):
+    self._run(100, 1.0)                               # settle in HOLD behind a lead
+    self.assertEqual(self._run(100, 1.8), RESUME_PULSE_SENDS)
+
+  def test_pulse_is_three_sends(self):
+    # 3 sends at 20 Hz is the 150 ms a real button press measured on the car. the literal is
+    # the point of the test: written against the constant it would prove nothing about length
+    self._run(100, 1.0)
+    self.assertEqual(self._run(100, 1.8), 3)
+
+  def test_noise_alone_never_fires(self):
+    # the real trace wandered between 0.96 and 1.16 m for 14 s without the lead moving, and it
+    # wandered slowly, so the debounce alone does not save us. the threshold has to do the work
+    self.assertEqual(self._run(1500, lambda f: 1.06 + 0.1 * (-1) ** (f // 40)), 0)
+
+  def test_no_lead_means_no_resume(self):
+    # first in line at a red light. nothing on this car can tell us the light changed
+    self.assertEqual(self._run(500, 5.0, car_follow=False), 0)
+
+  def test_does_not_fire_before_settling_into_hold(self):
+    # gap opening from the very first frame of HOLD. that is a car still rolling to a stop,
+    # not a lead pulling away, so nothing may fire until the settle time is up. the frame
+    # count is a literal on purpose: derived from the constant, this test goes vacuous the
+    # moment the constant is what breaks
+    self.assertLess(45, RESUME_MIN_HOLD_FRAMES + 1)
+    self.assertEqual(self._run(45, lambda f: 1.0 + 0.05 * f), 0)
+
+  def test_a_brief_spike_does_not_fire(self):
+    # one bad reading is not the lead moving. the gap has to stay open to count
+    self.assertEqual(self._run(400, lambda f: 2.0 if 200 <= f < 206 else 1.0), 0)
+
+  def test_driver_on_the_brake_blocks_it(self):
+    self._run(100, 1.0)
+    self.assertEqual(self._run(100, 1.8, brake=True), 0)
+
+  def test_driver_on_the_gas_blocks_it(self):
+    self._run(100, 1.0)
+    self.assertEqual(self._run(100, 1.8, gas=True), 0)
+
+  def test_openpilot_disengaged_blocks_it(self):
+    self._run(100, 1.0)
+    self.assertEqual(self._run(100, 1.8, enabled=False), 0)
+
+  def test_leaving_hold_forgets_the_stop(self):
+    self._run(100, 1.0)
+    self._run(10, 1.0, hold=False)                    # rolled away
+    # back at a stop, but the lead reference is gone with it, so the old gap cannot fire
+    self.assertEqual(self._run(100, 1.8), 0)
+
+  def test_retries_a_few_times_if_the_car_ignores_it(self):
+    self._run(100, 1.0)
+    # gap stays open and the car stays in HOLD, so the press clearly did not take
+    total = self._run(3000, 1.8)
+    self.assertEqual(total, RESUME_PULSE_SENDS * RESUME_MAX_ATTEMPTS)
+
+  def test_disabled_without_the_flag(self):
+    CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    self.CC = CarController(None, CP)
+    self._run(100, 1.0)
+    self.assertEqual(self._run(100, 1.8), 0)
+
+  def test_flag_is_read_live_not_snapshotted(self):
+    # enable_auto_resume runs after the interface is built, so a cached copy would be stale
+    CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    CC = CarController(None, CP)
+    self.assertFalse(CC.auto_resume_available)
+    enable_auto_resume(CP)
+    self.assertTrue(CC.auto_resume_available)
+
+  def test_safety_param_survives_capnp(self):
+    CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    before = CP.safetyConfigs[0].safetyParam
+    enable_auto_resume(CP)
+    self.assertEqual(CP.safetyConfigs[0].safetyParam, before | SubaruSafetyFlags.AUTO_RESUME)
+    self.assertTrue(is_auto_resume_enabled(CP.as_reader()))
+
+
+class TestSubaruResumeMessage(unittest.TestCase):
+  PLATFORM = CAR.SUBARU_CROSSTREK_2024
+
+  def setUp(self):
+    self.packer = CANPacker(DBC[self.PLATFORM][Bus.pt])
+    self.parser = CANParser(DBC[self.PLATFORM][Bus.pt], [("ES_Distance", 20)], 1)
+    self.camera = {s: 0 for s in ["CHECKSUM", "COUNTER", "Signal1", "Cruise_Fault", "Cruise_Throttle", "Signal2",
+                                  "Car_Follow", "Low_Speed_Follow", "Cruise_Soft_Disable", "Signal7",
+                                  "Cruise_Brake_Active", "Distance_Swap", "Cruise_EPB", "Signal4", "Close_Distance",
+                                  "Signal5", "Cruise_Cancel", "Cruise_Set", "Cruise_Resume", "Signal6"]}
+
+  def _build(self, **kwargs):
+    addr, dat, _ = subarucan.create_es_distance(self.packer, 1, self.camera, 1, kwargs.pop("pcm_cancel_cmd", False), **kwargs)
+    self.parser.update([(0, [(addr, bytes(dat), 1)])])
+    return self.parser.vl["ES_Distance"]
+
+  def test_resume_sets_the_bit_with_inactive_throttle(self):
+    out = self._build(cruise_resume_cmd=True)
+    self.assertEqual(out["Cruise_Resume"], 1)
+    self.assertEqual(out["Cruise_Cancel"], 0)
+    self.assertEqual(out["Cruise_Set"], 0)
+    self.assertEqual(out["Cruise_Throttle"], 1818)
+
+  def test_cancel_wins_over_resume(self):
+    out = self._build(pcm_cancel_cmd=True, cruise_resume_cmd=True)
+    self.assertEqual(out["Cruise_Cancel"], 1)
+    self.assertEqual(out["Cruise_Resume"], 0)
+
+  def test_neither_bit_set_by_default(self):
+    out = self._build()
+    self.assertEqual(out["Cruise_Resume"], 0)
+    self.assertEqual(out["Cruise_Cancel"], 0)
