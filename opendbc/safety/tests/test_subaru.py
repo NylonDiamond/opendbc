@@ -134,18 +134,6 @@ class TestSubaruStockLongitudinalSafetyBase(TestSubaruSafetyBase):
     for cancel in [True, False]:
       self._generic_limit_safety_check(partial(self._cancel_msg, cancel), self.INACTIVE_GAS, self.INACTIVE_GAS, 0, 2**12, 1, self.INACTIVE_GAS, cancel)
 
-  def _resume_msg(self, resume, cancel=False, cruise_throttle=None):
-    values = {"Cruise_Resume": resume, "Cruise_Cancel": cancel,
-              "Cruise_Throttle": self.INACTIVE_GAS if cruise_throttle is None else cruise_throttle}
-    return self.packer.make_can_msg_safety("ES_Distance", self.ALT_MAIN_BUS, values)
-
-  def test_resume_blocked_without_flag(self):
-    # faking the resume button is a capability the flag grants, so it stays refused without it
-    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS & ~SubaruSafetyFlags.AUTO_RESUME)
-    self.safety.init_tests()
-    self._rx(self._speed_msg(0))
-    self.assertFalse(self._tx(self._resume_msg(True)))
-
 
 class TestSubaruLongitudinalSafetyBase(TestSubaruSafetyBase, common.LongitudinalGasBrakeSafetyTest):
   MIN_GAS = 808
@@ -698,45 +686,6 @@ class TestSubaruGen2AngleMadsMainSafety(TestSubaruGen2AngleMadsSafety):
     self._rx(self._main_switch_msg(False))
     self._rx(self._main_switch_msg(True))
     self.assertFalse(self.safety.get_controls_allowed())
-
-
-class TestSubaruGen2AngleAutoResumeSafety(TestSubaruGen2AngleMadsSafety):
-  """Auto resume: openpilot may fake the resume button, but only from a standstill.
-
-  Everything the plain MADS car does still applies, so this inherits the full suite. Only
-  the extra ES_Distance path is new, and those tests are below.
-  """
-  FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS | SubaruSafetyFlags.AUTO_RESUME
-  MADS_MAIN = False
-
-  def test_resume_allowed_at_standstill(self):
-    self._rx(self._speed_msg(0))
-    self.assertTrue(self._tx(self._resume_msg(True)))
-
-  def test_resume_blocked_while_moving(self):
-    # the whole point of the standstill gate: a fake resume can never speed up a rolling car
-    self._rx(self._speed_msg(10))
-    self.assertFalse(self._tx(self._resume_msg(True)))
-
-  def test_resume_needs_inactive_throttle(self):
-    # the resume path must never carry an acceleration request of its own
-    self._rx(self._speed_msg(0))
-    for throttle in (0, 808, 1817, 1819, 3400):
-      self.assertFalse(self._tx(self._resume_msg(True, cruise_throttle=throttle)))
-
-  def test_resume_and_cancel_together_blocked(self):
-    self._rx(self._speed_msg(0))
-    self.assertFalse(self._tx(self._resume_msg(True, cancel=True)))
-
-  def test_empty_es_distance_still_blocked(self):
-    # neither bit set is still not a reason to put ES_Distance on the bus
-    self._rx(self._speed_msg(0))
-    self.assertFalse(self._tx(self._resume_msg(False)))
-
-  def test_cancel_still_allowed_while_moving(self):
-    # auto resume must not narrow the cancel path, which has no standstill condition
-    self._rx(self._speed_msg(10))
-    self.assertTrue(self._tx(self._resume_msg(False, cancel=True)))
 
 
 if __name__ == "__main__":

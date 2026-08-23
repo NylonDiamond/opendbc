@@ -100,7 +100,6 @@ static bool subaru_lkas_angle = false;
 static bool subaru_mads = false;
 static bool subaru_mads_main = false;
 static bool subaru_main_on_prev = true;
-static bool subaru_auto_resume = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -265,21 +264,10 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     if (subaru_longitudinal) {
       violation |= longitudinal_gas_checks(cruise_throttle, SUBARU_LONG_LIMITS);
     } else {
-      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel
-      // requests, and for cruise resume requests when auto resume is enabled. Cruise_Throttle
-      // must be inactive either way, so neither path can command any acceleration itself.
-      bool cruise_resume = (msg->data[7] >> 2) & 1U;
-
-      // Resume only from a standstill. This is the whole feature (pull away when the lead
-      // moves off), and it bounds the damage a bad resume can do: the car can never be made
-      // to speed up while already rolling. ACC still owns the pedals once it takes the request.
-      bool resume_allowed = subaru_auto_resume && !vehicle_moving;
-
+      // If openpilot is not controlling long, only allow ES_Distance for cruise cancel requests,
+      // (when Cruise_Cancel is true, and Cruise_Throttle is inactive)
       violation |= (cruise_throttle != SUBARU_LONG_LIMITS.inactive_gas);
-      violation |= (!cruise_cancel && !(cruise_resume && resume_allowed));
-
-      // never both at once, so a malformed message cannot ask for cancel and resume together
-      violation |= (cruise_cancel && cruise_resume);
+      violation |= (!cruise_cancel);
     }
   }
 
@@ -367,7 +355,6 @@ static safety_config subaru_init(uint16_t param) {
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
   const uint16_t SUBARU_PARAM_MADS = 16;
   const uint16_t SUBARU_PARAM_MADS_MAIN = 32;
-  const uint16_t SUBARU_PARAM_AUTO_RESUME = 64;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
@@ -387,10 +374,6 @@ static safety_config subaru_init(uint16_t param) {
   subaru_mads_main = subaru_mads && GET_FLAG(param, SUBARU_PARAM_MADS_MAIN);
   // assume the switch is already on, which it is with the car running
   subaru_main_on_prev = true;
-
-  // Only read by the stock longitudinal branch of the ES_Distance check, so openpilot
-  // longitudinal is already excluded: there the throttle path exists and this is meaningless.
-  subaru_auto_resume = GET_FLAG(param, SUBARU_PARAM_AUTO_RESUME);
 
   safety_config ret;
   if (subaru_lkas_angle && subaru_mads) {
