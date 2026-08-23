@@ -73,7 +73,6 @@ class SubaruSafetyFlags(IntFlag):
   LKAS_ANGLE = 8
   MADS = 16
   MADS_MAIN = 32
-  AUTO_RESUME = 64
 
 
 def enable_mads(CP) -> None:
@@ -110,24 +109,6 @@ def is_mads_main_enabled(CP) -> bool:
   Same rule as is_mads_enabled: read it every time, never snapshot it.
   """
   return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS_MAIN)
-
-
-def enable_auto_resume(CP) -> None:
-  """Let openpilot fake the resume button when the lead pulls away from a stop.
-
-  Same shape as enable_mads: openpilot's call rather than the car's, so it is applied after
-  the interface is built. The panda gates the resume send on this flag, so turning it off
-  removes the capability outright instead of only stopping the sender.
-  """
-  CP.safetyConfigs[0].safetyParam = int(CP.safetyConfigs[0].safetyParam | SubaruSafetyFlags.AUTO_RESUME)
-
-
-def is_auto_resume_enabled(CP) -> bool:
-  """Read the auto resume path back off the safety param.
-
-  Same rule as is_mads_enabled: read it every time, never snapshot it.
-  """
-  return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.AUTO_RESUME)
 
 
 class SubaruFlags(IntFlag):
