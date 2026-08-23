@@ -217,12 +217,10 @@ class CarController(CarControllerBase):
       self.stop_start_done = True
       return can_sends
 
-    # neither setting means anything while rolling, and the panda refuses both anyway
-    if not CS.out.standstill:
-      return can_sends
-
     # *** auto vehicle hold ***
-    if avh_wanted and not self.avh_done:
+    # parked only. this is the one request that touches the brakes, so it stays a start of
+    # drive action and the panda refuses it while moving regardless of what we do here.
+    if avh_wanted and not self.avh_done and CS.out.standstill:
       if self.avh_burst_left == 0 and CS.avh_active is False:
         self.avh_burst_left = COMFORT_BURST_LEN
       if self.avh_burst_left > 0:
@@ -240,6 +238,10 @@ class CarController(CarControllerBase):
     # *** auto start-stop engine shutoff ***
     # this one is a button press rather than a state, so it toggles. only ever send it when
     # the shutoff is still armed, or it would switch the thing back on.
+    #
+    # unlike AVH this does not wait for standstill. it touches nothing but the engine's own
+    # idle stop, and openpilot is often still starting up as the driver pulls away, so a
+    # standstill gate here would mostly just miss.
     if stop_start_wanted and not self.stop_start_done and CS.dashlights_msg is not None:
       if self.stop_start_burst_left == 0 and CS.stop_start_disabled is False:
         self.stop_start_burst_left = COMFORT_BURST_LEN
