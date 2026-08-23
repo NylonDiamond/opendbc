@@ -429,12 +429,13 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
     self.safety.set_controls_allowed(True)
     self.assertEqual(self.COMFORT, self._tx(self._stop_start_msg(True)))
 
-  def test_avh_refused_while_moving(self):
-    # AVH is the one request that touches the brakes, so it can never reach a rolling car
+  def test_avh_allowed_while_moving(self):
+    # the button arms Auto Vehicle Hold, it does not apply the brakes, and the car only ever
+    # holds once it has already stopped. the content pin is what keeps this address safe.
     self.safety.set_controls_allowed(True)
     self._rx(self._speed_msg(10))
     self.assertTrue(self.safety.get_vehicle_moving())
-    self.assertFalse(self._tx(self._comfort_control_msg(2)))
+    self.assertEqual(self.COMFORT, self._tx(self._comfort_control_msg(2)))
 
   def test_stop_start_allowed_while_moving(self):
     # the start-stop button touches nothing but the engine's own idle stop, and openpilot is

@@ -13,13 +13,15 @@ from opendbc.car.vehicle_model import VehicleModel
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 
-# Comfort settings the car forgets every ignition cycle. Both requests are one shot: a short
-# burst while parked, only if the car is in the wrong state, then nothing for the rest of the
-# drive. Frames are 100 Hz.
+# Comfort settings the car forgets every ignition cycle. Each request is made at the start of a
+# drive, only if the car is in the wrong state, repeated until the car answers, and then latched
+# done for the rest of the drive. Neither waits for standstill. Frames are 100 Hz.
 COMFORT_SETTLE_FRAMES = 500   # 5 s, long enough for every message we compare against to arrive
 COMFORT_DEADLINE_FRAMES = 6000  # 60 s, after which this stops being a start of drive action
 COMFORT_BURST_LEN = 8         # frames per request, matching a real button press
 COMFORT_BURST_STEP = 5        # 50 ms apart, also matching
+# 2 s between attempts. the car answers in about 90 ms, so this is mostly about not hammering it
+COMFORT_BURST_SETTLE = 200
 
 # The start-stop button is edge triggered, and the car keeps sending its own Dashlights at
 # 10 Hz with the button bit clear. Every one of those clear frames reads as a release, so a
@@ -47,10 +49,12 @@ class CarController(CarControllerBase):
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
 
-    # one shot comfort requests: frames still to send, and whether this drive is finished
-    # with them either way. both start unfired and can only ever fire once.
+    # start of drive comfort requests: frames still to send, how long to wait for the car to
+    # answer, and whether this drive is finished with them either way. once done latches, the
+    # driver is left alone for the rest of the drive.
     self.avh_burst_left = 0
     self.avh_counter = 0
+    self.avh_wait = 0
     self.avh_done = False
     self.stop_start_press_left = 0
     self.stop_start_wait = 0
@@ -220,9 +224,9 @@ class CarController(CarControllerBase):
     if not (avh_wanted or stop_start_wanted):
       return can_sends
 
-    # let the bus settle first, then give up if we never got a chance while parked. after the
-    # deadline this stops being a start of drive action, and surprising the driver with it
-    # mid drive is worse than not doing it at all.
+    # let the bus settle first, then give up if the car never answered. after the deadline this
+    # stops being a start of drive action, and surprising the driver with it mid drive is worse
+    # than not doing it at all.
     if self.frame < COMFORT_SETTLE_FRAMES:
       return can_sends
     if self.frame > COMFORT_DEADLINE_FRAMES:
@@ -231,22 +235,35 @@ class CarController(CarControllerBase):
       return can_sends
 
     # *** auto vehicle hold ***
-    # parked only. this is the one request that touches the brakes, so it stays a start of
-    # drive action and the panda refuses it while moving regardless of what we do here.
-    if avh_wanted and not self.avh_done and CS.out.standstill:
-      if self.avh_burst_left == 0 and CS.avh_active is False:
-        self.avh_burst_left = COMFORT_BURST_LEN
+    # not gated on standstill. the button arms the hold, it does not apply the brakes: the car
+    # only ever holds once it has already stopped under the driver's own braking. so asking
+    # while rolling does exactly what the driver's own thumb does, and openpilot is often still
+    # starting up as the driver pulls away, so a standstill gate here mostly just missed.
+    #
+    # the result is read back and the request repeated, rather than fired once and assumed. a
+    # car that ignores this while moving would otherwise lose the setting for the whole drive.
+    # the moment AVH is seen on this latches done, so a later touchscreen press off is never
+    # fought, and the retry loop only ever runs while AVH has never once been on.
+    if avh_wanted and not self.avh_done:
       if self.avh_burst_left > 0:
+        # mid burst. a real press keeps going after the car has already answered, so this one
+        # runs to the end rather than cutting short the moment the state flips.
         if self.frame % COMFORT_BURST_STEP == 0:
           self.avh_counter += 1
           # 2 is the on request. the car answers on Comfort_Status about 90 ms later
           can_sends.append(subarucan.create_comfort_control(self.packer, self.avh_counter, 2))
           self.avh_burst_left -= 1
           if self.avh_burst_left == 0:
-            self.avh_done = True
+            self.avh_wait = COMFORT_BURST_SETTLE
       elif CS.avh_active:
-        # already on, nothing to ask for
+        # on, either already or because a burst took. never ask again this drive
         self.avh_done = True
+      elif self.avh_wait > 0:
+        # give the car room to answer before deciding the request missed
+        self.avh_wait -= 1
+      elif CS.avh_active is False:
+        # a definite reading of off. None means Comfort_Status has not arrived yet
+        self.avh_burst_left = COMFORT_BURST_LEN
 
     # *** auto start-stop engine shutoff ***
     # this one is a button press rather than a state, so it toggles. only ever press it when

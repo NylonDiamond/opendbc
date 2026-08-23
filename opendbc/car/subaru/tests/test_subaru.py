@@ -208,13 +208,32 @@ class TestSubaruLkasAlert(unittest.TestCase):
 
 
 class FakeCarState:
-  """The handful of CarState fields the comfort one shot reads."""
+  """The handful of CarState fields the comfort request reads, plus the car's AVH answer.
+
+  Comfort_Control carries a direction rather than a toggle, so unlike the start-stop button it
+  is not affected by the car's own frames interleaving with ours. It just answers, about 90 ms
+  after the request lands.
+  """
+
+  AVH_ANSWER_DELAY = 9  # control frames before Comfort_Status carries the new state, ~90 ms measured
 
   def __init__(self, standstill=True, avh_active=None, stop_start_disabled=None, dashlights=True):
     self.out = SimpleNamespace(standstill=standstill)
     self.avh_active = avh_active
     self.stop_start_disabled = stop_start_disabled
     self.dashlights_msg = DASHLIGHTS_TEMPLATE if dashlights else None
+    self.avh_deaf = False  # a car that hears the request but never acts on it
+    self.avh_answer_in = None
+
+  def step(self, sent):
+    if any(addr == 0x6bb for addr, _, _ in sent):
+      if not self.avh_deaf and self.avh_answer_in is None:
+        self.avh_answer_in = self.AVH_ANSWER_DELAY
+    if self.avh_answer_in is not None:
+      self.avh_answer_in -= 1
+      if self.avh_answer_in == 0:
+        self.avh_active = True
+        self.avh_answer_in = None
 
 
 DASHLIGHTS_TEMPLATE = {"CHECKSUM": 0, "COUNTER": 3, "Signal1": 0, "Signal2": 0x11, "UNITS": 1,
@@ -247,6 +266,7 @@ class FakeStopStartCar(FakeCarState):
     self.tick = 0
 
   def step(self, sent):
+    super().step(sent)
     if any(addr == 0x390 for addr, _, _ in sent):
       self.gap_pressed = True
     self.tick += 1
@@ -265,11 +285,12 @@ class FakeStopStartCar(FakeCarState):
 
 
 class TestSubaruComfort(unittest.TestCase):
-  """Auto Vehicle Hold and the auto start-stop shutoff are one shot requests.
+  """Auto Vehicle Hold and the auto start-stop shutoff are start of drive requests.
 
-  The car forgets both every ignition cycle. openpilot asks once, while parked, and only if
-  the car is in the wrong state. After that a touchscreen press always wins, so a stuck
-  state machine can never fight the driver.
+  The car forgets both every ignition cycle. openpilot asks at the start of a drive, only if
+  the car is in the wrong state, and repeats until the car answers. Once the car is in the
+  wanted state that latches for the drive, so a touchscreen press always wins afterwards and a
+  stuck state machine can never fight the driver.
   """
   PLATFORM = CAR.SUBARU_CROSSTREK_2024
 
@@ -288,8 +309,7 @@ class TestSubaruComfort(unittest.TestCase):
     for _ in range(frames):
       step = CC.update_comfort(CS)
       sent += step
-      if isinstance(CS, FakeStopStartCar):
-        CS.step(step)
+      CS.step(step)
       CC.frame += 1
     return sent
 
@@ -393,11 +413,33 @@ class TestSubaruComfort(unittest.TestCase):
     CC = self._controller(stop_start=True)
     self.assertEqual([], self._run(CC, FakeCarState(stop_start_disabled=False, dashlights=False)))
 
-  def test_avh_waits_for_standstill(self):
-    # AVH is the one request that touches the brakes, so it stays parked only
+  def test_avh_asks_while_moving(self):
+    # the button arms the hold, it does not apply the brakes, and the car only ever holds once
+    # it has already stopped. so this does not wait for a standstill either, and a driver who
+    # pulls away before openpilot has started still gets the setting.
     CC = self._controller(avh=True)
     CS = FakeCarState(standstill=False, avh_active=False)
-    self.assertEqual([], self._run(CC, CS))
+    self.assertEqual(COMFORT_BURST_LEN, len(self._run(CC, CS)))
+    self.assertTrue(CS.avh_active)
+
+  def test_avh_asks_again_if_the_first_one_missed(self):
+    # a car that ignores the request would otherwise lose the setting for the whole drive
+    CC = self._controller(avh=True)
+    CS = FakeCarState(avh_active=False)
+    CS.avh_deaf = True
+    sent = self._run(CC, CS)
+    self.assertGreater(len(sent), COMFORT_BURST_LEN, "one unanswered burst is not an answer")
+    self.assertTrue(all(addr == 0x6bb for addr, _, _ in sent))
+
+  def test_avh_leaves_the_driver_alone_afterwards(self):
+    # once AVH has been seen on, openpilot is finished with it for the drive. a driver turning
+    # it back off on the touchscreen is never fought.
+    CC = self._controller(avh=True)
+    CS = FakeCarState(avh_active=False)
+    self.assertEqual(COMFORT_BURST_LEN, len(self._run(CC, CS)))
+    self.assertTrue(CS.avh_active)
+    CS.avh_active = False
+    self.assertEqual([], self._run(CC, CS, frames=1000, start=CC.frame))
 
   def test_stop_start_asks_while_moving(self):
     # openpilot is often still starting up as the driver pulls away, and this button touches
@@ -416,9 +458,9 @@ class TestSubaruComfort(unittest.TestCase):
     # past this it stops being a start of drive action, and surprising the driver with it
     # mid drive is worse than not doing it at all
     CC = self._controller(avh=True)
-    CS = FakeCarState(standstill=False, avh_active=False)
-    self._run(CC, CS, frames=COMFORT_DEADLINE_FRAMES)
-    CS.out.standstill = True
+    CS = FakeCarState(avh_active=False)
+    CS.avh_deaf = True
+    self.assertNotEqual([], self._run(CC, CS, frames=COMFORT_DEADLINE_FRAMES))
     self.assertEqual([], self._run(CC, CS, start=CC.frame))
 
   def test_both_ask_together(self):

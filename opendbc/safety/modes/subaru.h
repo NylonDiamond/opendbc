@@ -295,11 +295,16 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     // 1 is off, 2 is on, 0 is the idle frame. bytes 3 to 7 are the steady state the car
     // sends with the engine running, pinned here so openpilot can send this one frame and
     // no other. whatever else this message carries stays out of reach.
+    //
+    // Deliberately not gated on vehicle_moving. This button arms Auto Vehicle Hold, it does
+    // not apply the brakes: the car only ever holds once it has already come to a stop under
+    // the driver's own braking. So the request reaching a rolling car does exactly what the
+    // driver's own thumb does on the touchscreen, and the content pin below is what keeps
+    // this address from carrying anything else.
     const bool valid_request = (msg->data[2] == 0U) || (msg->data[2] == 1U) || (msg->data[2] == 2U);
     const bool valid_static = (msg->data[3] == 0x01U) && (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
                               (msg->data[6] == 0x0EU) && (msg->data[7] == 0x00U);
     violation |= !subaru_avh;
-    violation |= vehicle_moving;
     violation |= !valid_request;
     violation |= !valid_static;
   }
