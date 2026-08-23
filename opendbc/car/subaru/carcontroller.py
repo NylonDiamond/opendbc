@@ -21,6 +21,16 @@ COMFORT_DEADLINE_FRAMES = 6000  # 60 s, after which this stops being a start of 
 COMFORT_BURST_LEN = 8         # frames per request, matching a real button press
 COMFORT_BURST_STEP = 5        # 50 ms apart, also matching
 
+# The start-stop button is edge triggered, and the car keeps sending its own Dashlights at
+# 10 Hz with the button bit clear. Every one of those clear frames reads as a release, so a
+# burst that spans several of them lands as several presses, and the setting toggles back and
+# forth. Measured on route 00000334: eight frames 50 ms apart became four presses and ended
+# up exactly where it started. So a press is kept short enough to sit inside one 100 ms gap
+# between the car's own frames, and it is checked and repeated instead of assumed.
+COMFORT_PRESS_FRAMES = 2      # 20 ms of button bit, well inside one gap
+COMFORT_PRESS_SETTLE = 40     # 400 ms to let the car answer before judging the press
+COMFORT_PRESS_TRIES = 5       # give up rather than sit here toggling
+
 
 def get_safety_CP():
   # Use the Ascent for lateral limiting to match safety (most restrictive slip factor)
@@ -42,8 +52,11 @@ class CarController(CarControllerBase):
     self.avh_burst_left = 0
     self.avh_counter = 0
     self.avh_done = False
-    self.stop_start_burst_left = 0
+    self.stop_start_press_left = 0
+    self.stop_start_wait = 0
+    self.stop_start_tries = 0
     self.stop_start_counter = 0
+    self.stop_start_seen_counter = None
     self.stop_start_done = False
 
     self.p = CarControllerParams(CP)
@@ -236,25 +249,42 @@ class CarController(CarControllerBase):
         self.avh_done = True
 
     # *** auto start-stop engine shutoff ***
-    # this one is a button press rather than a state, so it toggles. only ever send it when
+    # this one is a button press rather than a state, so it toggles. only ever press it when
     # the shutoff is still armed, or it would switch the thing back on.
     #
     # unlike AVH this does not wait for standstill. it touches nothing but the engine's own
     # idle stop, and openpilot is often still starting up as the driver pulls away, so a
     # standstill gate here would mostly just miss.
     if stop_start_wanted and not self.stop_start_done and CS.dashlights_msg is not None:
-      if self.stop_start_burst_left == 0 and CS.stop_start_disabled is False:
-        self.stop_start_burst_left = COMFORT_BURST_LEN
-        self.stop_start_counter = int(CS.dashlights_msg["COUNTER"])
-      if self.stop_start_burst_left > 0:
-        if self.frame % COMFORT_BURST_STEP == 0:
-          self.stop_start_counter += 1
-          can_sends.append(subarucan.create_stop_start_press(self.packer, self.stop_start_counter,
-                                                             CS.dashlights_msg))
-          self.stop_start_burst_left -= 1
-          if self.stop_start_burst_left == 0:
-            self.stop_start_done = True
-      elif CS.stop_start_disabled:
+      # the car's counter advances once per Dashlights frame, so a change here means one of
+      # its frames just landed and the gap before the next one is ours
+      car_counter = int(CS.dashlights_msg["COUNTER"])
+      fresh_frame = self.stop_start_seen_counter is not None and car_counter != self.stop_start_seen_counter
+      self.stop_start_seen_counter = car_counter
+
+      if CS.stop_start_disabled:
+        # the shutoff is off, which is all we wanted
         self.stop_start_done = True
+      elif self.stop_start_press_left > 0:
+        # mid press. hold the button bit down on consecutive frames so the car sees one edge
+        self.stop_start_counter += 1
+        can_sends.append(subarucan.create_stop_start_press(self.packer, self.stop_start_counter,
+                                                           CS.dashlights_msg))
+        self.stop_start_press_left -= 1
+        if self.stop_start_press_left == 0:
+          self.stop_start_wait = COMFORT_PRESS_SETTLE
+      elif self.stop_start_wait > 0:
+        # the car answers on Engine_Stop_Start within about 30 ms, but give it room
+        self.stop_start_wait -= 1
+      elif self.stop_start_tries >= COMFORT_PRESS_TRIES:
+        # something about this car does not match what was measured. stop rather than sit
+        # here toggling the setting for the rest of the drive.
+        self.stop_start_done = True
+      elif CS.stop_start_disabled is False and fresh_frame:
+        # start the press right after one of the car's own frames, so the whole press fits in
+        # the gap before the next one and reads as a single edge
+        self.stop_start_counter = car_counter
+        self.stop_start_tries += 1
+        self.stop_start_press_left = COMFORT_PRESS_FRAMES
 
     return can_sends
