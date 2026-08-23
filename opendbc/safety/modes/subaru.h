@@ -307,11 +307,16 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
   // Auto start-stop engine shutoff. This one is the dash button rather than a state, so a
   // frame without the button bit set would just be openpilot competing with the car's own
   // copy of a message it has no business sending.
+  //
+  // Deliberately not gated on vehicle_moving, unlike Comfort_Control above. This button
+  // touches nothing but the engine's own idle stop, so the worst it can do at speed is
+  // change a setting that only takes effect at the next standstill. Openpilot is often not
+  // running yet when the driver pulls away, and a start of drive gate the driver can beat
+  // by leaving quickly is a gate that mostly just fails to help.
   if (msg->addr == MSG_SUBARU_Dashlights) {
     // Signal: Dashlights.STOP_START
     const bool stop_start_pressed = GET_BIT(msg, 54U);
     violation |= !subaru_stop_start;
-    violation |= vehicle_moving;
     violation |= !stop_start_pressed;
   }
 

@@ -298,10 +298,19 @@ class TestSubaruComfort(unittest.TestCase):
     CC = self._controller(stop_start=True)
     self.assertEqual([], self._run(CC, FakeCarState(stop_start_disabled=False, dashlights=False)))
 
-  def test_nothing_while_moving(self):
-    CC = self._controller(avh=True, stop_start=True)
-    CS = FakeCarState(standstill=False, avh_active=False, stop_start_disabled=False)
+  def test_avh_waits_for_standstill(self):
+    # AVH is the one request that touches the brakes, so it stays parked only
+    CC = self._controller(avh=True)
+    CS = FakeCarState(standstill=False, avh_active=False)
     self.assertEqual([], self._run(CC, CS))
+
+  def test_stop_start_asks_while_moving(self):
+    # openpilot is often still starting up as the driver pulls away, and this button touches
+    # nothing but the engine's own idle stop, so it does not wait for a standstill
+    CC = self._controller(stop_start=True)
+    CS = FakeCarState(standstill=False, stop_start_disabled=False)
+    sent = self._run(CC, CS)
+    self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x390]))
 
   def test_nothing_before_the_bus_settles(self):
     CC = self._controller(avh=True, stop_start=True)
@@ -311,8 +320,8 @@ class TestSubaruComfort(unittest.TestCase):
   def test_gives_up_after_the_deadline(self):
     # past this it stops being a start of drive action, and surprising the driver with it
     # mid drive is worse than not doing it at all
-    CC = self._controller(avh=True, stop_start=True)
-    CS = FakeCarState(standstill=False, avh_active=False, stop_start_disabled=False)
+    CC = self._controller(avh=True)
+    CS = FakeCarState(standstill=False, avh_active=False)
     self._run(CC, CS, frames=COMFORT_DEADLINE_FRAMES)
     CS.out.standstill = True
     self.assertEqual([], self._run(CC, CS, start=CC.frame))

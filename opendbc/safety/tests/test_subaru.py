@@ -429,13 +429,20 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
     self.safety.set_controls_allowed(True)
     self.assertEqual(self.COMFORT, self._tx(self._stop_start_msg(True)))
 
-  def test_comfort_refused_while_moving(self):
-    # both settings are only ever asked for while parked, so neither can reach a rolling car
+  def test_avh_refused_while_moving(self):
+    # AVH is the one request that touches the brakes, so it can never reach a rolling car
     self.safety.set_controls_allowed(True)
     self._rx(self._speed_msg(10))
     self.assertTrue(self.safety.get_vehicle_moving())
     self.assertFalse(self._tx(self._comfort_control_msg(2)))
-    self.assertFalse(self._tx(self._stop_start_msg(True)))
+
+  def test_stop_start_allowed_while_moving(self):
+    # the start-stop button touches nothing but the engine's own idle stop, and openpilot is
+    # often still starting up as the driver pulls away, so this one is not speed gated
+    self.safety.set_controls_allowed(True)
+    self._rx(self._speed_msg(10))
+    self.assertTrue(self.safety.get_vehicle_moving())
+    self.assertEqual(self.COMFORT, self._tx(self._stop_start_msg(True)))
 
   def test_comfort_control_pinned_content(self):
     # openpilot may send this one frame and no other: an out of range request, or any change
