@@ -48,6 +48,14 @@ class CarController(CarControllerBase):
     self.resume_attempts = 0
     self.resume_wait_frames = 0
 
+    # A cancel the driver asks for by hand, set from card.py off a debug toggle. The resume
+    # this car ignored produced no reaction anywhere on the bus, not even on the dash, so
+    # before spending more on resume we need to know whether an injected ES_Distance reaches
+    # anything at all. Cancel is the one button the panda already allows, which makes it the
+    # cheap way to ask that question. Temporary.
+    self.test_cancel_request = False
+    self.test_cancel_sends_left = 0
+
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
@@ -237,10 +245,18 @@ class CarController(CarControllerBase):
         # runs every frame so the hold timers stay honest, whatever the send path does
         cruise_resume_cmd = self._update_auto_resume(CC, CS)
 
-        if pcm_cancel_cmd:
+        # one pulse per request, the same 3 sends the camera itself uses for a real press
+        if self.test_cancel_request:
+          self.test_cancel_request = False
+          self.test_cancel_sends_left = RESUME_PULSE_SENDS
+        test_cancel_cmd = self.test_cancel_sends_left > 0 and self.frame % 5 == 0
+        if test_cancel_cmd:
+          self.test_cancel_sends_left -= 1
+
+        if pcm_cancel_cmd or test_cancel_cmd:
           if not (self.CP.flags & SubaruFlags.HYBRID):
             bus = CanBus.alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else CanBus.main
-            can_sends.append(subarucan.create_es_distance(self.packer, CS.es_distance_msg["COUNTER"] + 1, CS.es_distance_msg, bus, pcm_cancel_cmd))
+            can_sends.append(subarucan.create_es_distance(self.packer, CS.es_distance_msg["COUNTER"] + 1, CS.es_distance_msg, bus, True))
         elif cruise_resume_cmd:
           bus = CanBus.alt if self.CP.flags & SubaruFlags.GLOBAL_GEN2 else CanBus.main
           can_sends.append(subarucan.create_es_distance(self.packer, CS.es_distance_msg["COUNTER"] + 1, CS.es_distance_msg, bus, False,
