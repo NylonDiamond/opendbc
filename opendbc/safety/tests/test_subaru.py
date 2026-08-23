@@ -33,6 +33,8 @@ class SubaruMsg(enum.IntEnum):
   ES_HighBeamAssist = 0x22A
   ES_STATIC_1       = 0x325
   ES_STATIC_2       = 0x121
+  Dashlights        = 0x390
+  Comfort_Control   = 0x6bb
 
 
 SUBARU_MAIN_BUS = 0
@@ -49,6 +51,11 @@ def lkas_tx_msgs(alt_bus, lkas_msg=SubaruMsg.ES_LKAS, lkas_alert=False):
   if lkas_alert:
     msgs.append([SubaruMsg.ES_LKAS_Alert, SUBARU_MAIN_BUS])
   return msgs
+
+
+def comfort_tx_msgs(alt_bus):
+  return [[SubaruMsg.Comfort_Control,    alt_bus],
+          [SubaruMsg.Dashlights,         alt_bus]]
 
 
 def long_tx_msgs(alt_bus):
@@ -122,6 +129,16 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
   def _pcm_status_msg(self, enable):
     values = {"Cruise_Activated": enable}
     return self.packer.make_can_msg_safety("CruiseControl", self.ALT_MAIN_BUS, values)
+
+  def _comfort_control_msg(self, avh_request, signal2=0x01, signal5=0x0e):
+    # the frame the car sends with the engine running. the defaults are the constants the
+    # safety pins, so a test that wants a rejected frame overrides one of them
+    values = {"AVH_REQUEST": avh_request, "Signal2": signal2, "Signal5": signal5}
+    return self.packer.make_can_msg_safety("Comfort_Control", SUBARU_ALT_BUS, values)
+
+  def _stop_start_msg(self, pressed):
+    values = {"STOP_START": pressed}
+    return self.packer.make_can_msg_safety("Dashlights", SUBARU_ALT_BUS, values)
 
 
 class TestSubaruStockLongitudinalSafetyBase(TestSubaruSafetyBase):
@@ -394,9 +411,46 @@ class TestSubaruGen1AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
 class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
   ALT_MAIN_BUS = SUBARU_ALT_BUS
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True) + comfort_tx_msgs(SUBARU_ALT_BUS)
   RELAY_MALFUNCTION_ADDRS = ANGLE_RELAY_MALFUNCTION_ADDRS
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+
+  # whether openpilot was configured to ask for the comfort settings. the subclass below
+  # turns them on; here they are off, which is the default every car ships with.
+  COMFORT = False
+
+  def test_comfort_avh_flag(self):
+    # the AVH request is refused outright unless openpilot was told to ask for it
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(self.COMFORT, self._tx(self._comfort_control_msg(2)))
+    self.assertEqual(self.COMFORT, self._tx(self._comfort_control_msg(1)))
+
+  def test_comfort_stop_start_flag(self):
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(self.COMFORT, self._tx(self._stop_start_msg(True)))
+
+  def test_comfort_refused_while_moving(self):
+    # both settings are only ever asked for while parked, so neither can reach a rolling car
+    self.safety.set_controls_allowed(True)
+    self._rx(self._speed_msg(10))
+    self.assertTrue(self.safety.get_vehicle_moving())
+    self.assertFalse(self._tx(self._comfort_control_msg(2)))
+    self.assertFalse(self._tx(self._stop_start_msg(True)))
+
+  def test_comfort_control_pinned_content(self):
+    # openpilot may send this one frame and no other: an out of range request, or any change
+    # to the bytes the car holds constant, is a violation even with the flag on
+    self.safety.set_controls_allowed(True)
+    for bad_request in (3, 0x80, 0xff):
+      self.assertFalse(self._tx(self._comfort_control_msg(bad_request)), f"{bad_request=}")
+    self.assertFalse(self._tx(self._comfort_control_msg(2, signal2=0x00)))
+    self.assertFalse(self._tx(self._comfort_control_msg(2, signal5=0x00)))
+
+  def test_stop_start_press_only(self):
+    # a frame with the button bit clear is openpilot competing with the car's own copy of a
+    # message it has no business sending, so it is refused however the flags are set
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._stop_start_msg(False)))
 
 
 class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruAngleSafetyBase):
@@ -409,7 +463,7 @@ class TestSubaruGen2AngleMadsSafety(TestSubaruStockLongitudinalSafetyBase, TestS
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.MADS
   # whether the main switch arms on its own, so the shared tests below cover both variants
   MADS_MAIN = False
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True) + comfort_tx_msgs(SUBARU_ALT_BUS)
   RELAY_MALFUNCTION_ADDRS = ANGLE_RELAY_MALFUNCTION_ADDRS
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE, lkas_alert=True)
 
@@ -686,6 +740,40 @@ class TestSubaruGen2AngleMadsMainSafety(TestSubaruGen2AngleMadsSafety):
     self._rx(self._main_switch_msg(False))
     self._rx(self._main_switch_msg(True))
     self.assertFalse(self.safety.get_controls_allowed())
+
+
+class TestSubaruGen2AngleComfortSafety(TestSubaruGen2AngleStockLongitudinalSafety):
+  """The same angle car with openpilot allowed to ask for the two comfort settings.
+
+  Everything the plain angle car does still applies, so this inherits the whole suite. The
+  gates on content and on the car moving hold either way; only whether a well formed request
+  is allowed at all changes, which is what COMFORT flips.
+  """
+  FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.AVH | SubaruSafetyFlags.STOP_START
+  COMFORT = True
+
+  def test_comfort_needs_a_gen2_angle_car(self):
+    # the messages were only ever measured on the alt bus of a gen2 angle car, so the flags
+    # do nothing anywhere else however openpilot sets them
+    for flags in (SubaruSafetyFlags.GEN2, SubaruSafetyFlags.LKAS_ANGLE):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.subaru,
+                                   flags | SubaruSafetyFlags.AVH | SubaruSafetyFlags.STOP_START)
+      self.safety.init_tests()
+      self.safety.set_controls_allowed(True)
+      self.assertFalse(self._tx(self._comfort_control_msg(2)), f"{flags=}")
+      self.assertFalse(self._tx(self._stop_start_msg(True)), f"{flags=}")
+
+  def test_each_comfort_flag_only_opens_its_own_message(self):
+    # AVH is a brake function and start-stop is engine only, so they are asked for
+    # separately and must not let each other through
+    for flag, avh_ok, stop_start_ok in ((SubaruSafetyFlags.AVH, True, False),
+                                        (SubaruSafetyFlags.STOP_START, False, True)):
+      self.safety.set_safety_hooks(CarParams.SafetyModel.subaru,
+                                   SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | flag)
+      self.safety.init_tests()
+      self.safety.set_controls_allowed(True)
+      self.assertEqual(avh_ok, self._tx(self._comfort_control_msg(2)), f"{flag=}")
+      self.assertEqual(stop_start_ok, self._tx(self._stop_start_msg(True)), f"{flag=}")
 
 
 if __name__ == "__main__":

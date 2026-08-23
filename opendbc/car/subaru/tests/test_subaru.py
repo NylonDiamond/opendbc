@@ -1,12 +1,15 @@
 import unittest
+from types import SimpleNamespace
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.structs import CarControl
 from opendbc.car.subaru import subarucan
+from opendbc.car.subaru.carcontroller import CarController, COMFORT_BURST_LEN, COMFORT_DEADLINE_FRAMES, COMFORT_SETTLE_FRAMES
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.carstate import MadsLatch
-from opendbc.car.subaru.values import CAR, SubaruSafetyFlags, enable_mads, enable_mads_main, is_mads_enabled, is_mads_main_enabled
+from opendbc.car.subaru.values import CAR, CanBus, DBC, SubaruSafetyFlags, enable_avh, enable_mads, enable_mads_main, \
+                                      enable_stop_start_off, is_mads_enabled, is_mads_main_enabled
 
 VisualAlert = CarControl.HUDControl.VisualAlert
 
@@ -201,3 +204,125 @@ class TestSubaruLkasAlert(unittest.TestCase):
       dat = bytes(dat)
       self.assertEqual(dat[1] & 0xF, frame % 0x10)
       self.assertEqual(dat[0], (addr % 256 + addr // 256 + sum(dat[1:])) & 0xFF)
+
+
+class FakeCarState:
+  """The handful of CarState fields the comfort one shot reads."""
+
+  def __init__(self, standstill=True, avh_active=None, stop_start_disabled=None, dashlights=True):
+    self.out = SimpleNamespace(standstill=standstill)
+    self.avh_active = avh_active
+    self.stop_start_disabled = stop_start_disabled
+    self.dashlights_msg = DASHLIGHTS_TEMPLATE if dashlights else None
+
+
+DASHLIGHTS_TEMPLATE = {"CHECKSUM": 0, "COUNTER": 3, "Signal1": 0, "Signal2": 0x11, "UNITS": 1,
+                       "Signal3": 0x43, "ICY_ROAD": 0, "Signal4": 0x22, "Signal5": 0xfa,
+                       "SEATBELT_FL": 1, "Signal6": 0, "LEFT_BLINKER": 0, "RIGHT_BLINKER": 0,
+                       "Signal7": 0, "STOP_START": 0, "Signal8": 0, "Signal9": 0}
+
+
+class TestSubaruComfort(unittest.TestCase):
+  """Auto Vehicle Hold and the auto start-stop shutoff are one shot requests.
+
+  The car forgets both every ignition cycle. openpilot asks once, while parked, and only if
+  the car is in the wrong state. After that a touchscreen press always wins, so a stuck
+  state machine can never fight the driver.
+  """
+  PLATFORM = CAR.SUBARU_CROSSTREK_2024
+
+  def _controller(self, avh=False, stop_start=False):
+    CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    if avh:
+      enable_avh(CP)
+    if stop_start:
+      enable_stop_start_off(CP)
+    return CarController(DBC[CP.carFingerprint], CP.as_reader())
+
+  def _run(self, CC, CS, frames=3000, start=COMFORT_SETTLE_FRAMES):
+    """Drive update_comfort directly over a window of frames and collect what it sent."""
+    sent = []
+    CC.frame = start
+    for _ in range(frames):
+      sent += CC.update_comfort(CS)
+      CC.frame += 1
+    return sent
+
+  def test_nothing_without_either_flag(self):
+    CC = self._controller()
+    self.assertEqual([], self._run(CC, FakeCarState(avh_active=False, stop_start_disabled=False)))
+
+  def test_avh_asks_once_when_off(self):
+    CC = self._controller(avh=True)
+    sent = self._run(CC, FakeCarState(avh_active=False))
+    self.assertEqual(COMFORT_BURST_LEN, len(sent))
+    for addr, dat, bus in sent:
+      dat = bytes(dat)
+      self.assertEqual(0x6bb, addr)
+      self.assertEqual(CanBus.alt, bus)
+      # 2 is the on request, and the rest of the frame is the steady state the panda pins
+      self.assertEqual(2, dat[2])
+      self.assertEqual(bytes([0x01, 0x00, 0x00, 0x0e, 0x00]), dat[3:])
+      self.assertEqual((addr % 256 + addr // 256 + sum(dat[1:])) & 0xFF, dat[0])
+
+  def test_avh_says_nothing_when_already_on(self):
+    CC = self._controller(avh=True)
+    self.assertEqual([], self._run(CC, FakeCarState(avh_active=True)))
+
+  def test_avh_waits_for_a_real_message(self):
+    # None means Comfort_Status has never arrived. asking on that is asking on a guess
+    CC = self._controller(avh=True)
+    self.assertEqual([], self._run(CC, FakeCarState(avh_active=None)))
+
+  def test_stop_start_presses_once_when_armed(self):
+    CC = self._controller(stop_start=True)
+    sent = self._run(CC, FakeCarState(stop_start_disabled=False))
+    self.assertEqual(COMFORT_BURST_LEN, len(sent))
+    counters = []
+    for addr, dat, bus in sent:
+      dat = bytes(dat)
+      self.assertEqual(0x390, addr)
+      self.assertEqual(CanBus.alt, bus)
+      self.assertTrue(dat[6] & 0x40, "the button bit has to be set, the panda refuses it otherwise")
+      # everything else is copied from the car's own frame, so the blinker and seatbelt bits stay true
+      self.assertEqual(0x11, dat[2])
+      self.assertEqual(1, dat[6] & 0x1)
+      counters.append(dat[1] & 0xF)
+    self.assertEqual([(4 + i) % 16 for i in range(COMFORT_BURST_LEN)], counters)
+
+  def test_stop_start_says_nothing_when_already_off(self):
+    CC = self._controller(stop_start=True)
+    self.assertEqual([], self._run(CC, FakeCarState(stop_start_disabled=True)))
+
+  def test_stop_start_waits_for_a_frame_to_copy(self):
+    CC = self._controller(stop_start=True)
+    self.assertEqual([], self._run(CC, FakeCarState(stop_start_disabled=False, dashlights=False)))
+
+  def test_nothing_while_moving(self):
+    CC = self._controller(avh=True, stop_start=True)
+    CS = FakeCarState(standstill=False, avh_active=False, stop_start_disabled=False)
+    self.assertEqual([], self._run(CC, CS))
+
+  def test_nothing_before_the_bus_settles(self):
+    CC = self._controller(avh=True, stop_start=True)
+    CS = FakeCarState(avh_active=False, stop_start_disabled=False)
+    self.assertEqual([], self._run(CC, CS, frames=COMFORT_SETTLE_FRAMES, start=0))
+
+  def test_gives_up_after_the_deadline(self):
+    # past this it stops being a start of drive action, and surprising the driver with it
+    # mid drive is worse than not doing it at all
+    CC = self._controller(avh=True, stop_start=True)
+    CS = FakeCarState(standstill=False, avh_active=False, stop_start_disabled=False)
+    self._run(CC, CS, frames=COMFORT_DEADLINE_FRAMES)
+    CS.out.standstill = True
+    self.assertEqual([], self._run(CC, CS, start=CC.frame))
+
+  def test_both_ask_together(self):
+    CC = self._controller(avh=True, stop_start=True)
+    sent = self._run(CC, FakeCarState(avh_active=False, stop_start_disabled=False))
+    self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x6bb]))
+    self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x390]))
+
+
+if __name__ == "__main__":
+  unittest.main()

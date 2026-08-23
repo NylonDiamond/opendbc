@@ -53,6 +53,13 @@ class CarState(CarStateBase):
     # stays None on cars whose camera never sends the duplicate alert message
     self.es_lkas_alert_msg = None
 
+    # comfort settings the car forgets every ignition cycle. all three stay None until a
+    # real message has arrived, so a car that never sends them can never look like a car
+    # sitting in the wrong state, and the one-shot request never fires on stale zeros.
+    self.dashlights_msg = None
+    self.avh_active = None
+    self.stop_start_disabled = None
+
   @property
   def mads_enabled(self) -> bool:
     # MADS is configured by openpilot as a safety param, so the panda and this agree on it
@@ -215,6 +222,26 @@ class CarState(CarStateBase):
     self.es_dashstatus_msg = copy.copy(cp_cam.vl["ES_DashStatus"])
     if self.CP.flags & SubaruFlags.SEND_INFOTAINMENT:
       self.es_infotainment_msg = copy.copy(cp_cam.vl["ES_Infotainment"])
+
+    # *** comfort settings, read from the main bus and requested on the alt bus ***
+    # only on the gen2 angle cars these messages were measured on, which is also the only
+    # place the panda will let the requests out. preglobal cars use a different DBC that has
+    # none of these signals at all, so reading them there is a KeyError, not a zero.
+    if self.CP.flags & SubaruFlags.GLOBAL_GEN2 and self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      # vl has to be read before ts_nanos, which is what registers the message with the
+      # parser. a message the car never sends keeps ts_nanos at 0 and leaves these None.
+      dashlights = cp.vl["Dashlights"]
+      if cp.ts_nanos["Dashlights"]["STOP_START"] != 0:
+        self.dashlights_msg = copy.copy(dashlights)
+
+      comfort_status = cp.vl["Comfort_Status"]
+      if cp.ts_nanos["Comfort_Status"]["AVH_ACTIVE"] != 0:
+        self.avh_active = comfort_status["AVH_ACTIVE"] == 1
+
+      stop_start = cp.vl["Engine_Stop_Start"]
+      if cp.ts_nanos["Engine_Stop_Start"]["STOP_START_STATE"] != 0:
+        # 0 is the shutoff armed and ready, 3 is it switched off. 2 shows up briefly at boot
+        self.stop_start_disabled = stop_start["STOP_START_STATE"] == 3
 
     return ret
 
