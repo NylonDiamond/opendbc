@@ -73,6 +73,8 @@ class SubaruSafetyFlags(IntFlag):
   LKAS_ANGLE = 8
   MADS = 16
   MADS_MAIN = 32
+  AVH = 64
+  STOP_START = 128
 
 
 def enable_mads(CP) -> None:
@@ -109,6 +111,35 @@ def is_mads_main_enabled(CP) -> bool:
   Same rule as is_mads_enabled: read it every time, never snapshot it.
   """
   return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.MADS_MAIN)
+
+
+def enable_avh(CP) -> None:
+  """Let openpilot switch Auto Vehicle Hold on once at the start of a drive.
+
+  The car forgets AVH every ignition cycle, so this is a convenience: one request while
+  parked, then never again. It is still a brake function, so the panda refuses the message
+  outright without this flag, and refuses it while the car is moving even with it.
+  """
+  CP.safetyConfigs[0].safetyParam = int(CP.safetyConfigs[0].safetyParam | SubaruSafetyFlags.AVH)
+
+
+def is_avh_enabled(CP) -> bool:
+  """Read the AVH request path back off the safety param. Same never-snapshot rule as MADS."""
+  return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.AVH)
+
+
+def enable_stop_start_off(CP) -> None:
+  """Let openpilot switch the auto start-stop engine shutoff off once at the start of a drive.
+
+  Engine only, so this is the lower stakes of the two. The car defaults it on every ignition
+  cycle, which is the whole reason this exists.
+  """
+  CP.safetyConfigs[0].safetyParam = int(CP.safetyConfigs[0].safetyParam | SubaruSafetyFlags.STOP_START)
+
+
+def is_stop_start_off_enabled(CP) -> bool:
+  """Read the start-stop request path back off the safety param."""
+  return len(CP.safetyConfigs) > 0 and bool(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.STOP_START)
 
 
 class SubaruFlags(IntFlag):

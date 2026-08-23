@@ -25,6 +25,8 @@
 #define MSG_SUBARU_Steering_Torque       0x119U
 #define MSG_SUBARU_Steering_2            0x11aU
 #define MSG_SUBARU_Wheel_Speeds          0x13aU
+#define MSG_SUBARU_Dashlights            0x390U
+#define MSG_SUBARU_Comfort_Control       0x6bbU
 
 #define MSG_SUBARU_ES_LKAS               0x122U
 #define MSG_SUBARU_ES_LKAS_ANGLE         0x124U
@@ -55,6 +57,14 @@
 #define SUBARU_COMMON_TX_MSGS(alt_bus) \
   {MSG_SUBARU_ES_Distance, alt_bus, 8, .check_relay = false}, \
 
+/* Auto Vehicle Hold and the auto start-stop shutoff, both of which the car forgets every
+   ignition cycle. The car sends both messages itself, so relay checking would fault; what
+   keeps these safe is the tx hook, which refuses them unless openpilot was configured to
+   ask for them and refuses them outright while the car is moving. */
+#define SUBARU_COMFORT_TX_MSGS(alt_bus) \
+  {MSG_SUBARU_Comfort_Control,   alt_bus,         8, .check_relay = false}, \
+  {MSG_SUBARU_Dashlights,        alt_bus,         8, .check_relay = false}, \
+
 #define SUBARU_COMMON_RX_CHECKS(alt_bus)                                                                                                         \
   {.msg = {{MSG_SUBARU_Throttle,        SUBARU_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, \
   {.msg = {{MSG_SUBARU_Steering_Torque, SUBARU_MAIN_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},  \
@@ -82,6 +92,8 @@ static bool subaru_lkas_angle = false;
 static bool subaru_mads = false;
 static bool subaru_mads_main = false;
 static bool subaru_main_on_prev = true;
+static bool subaru_avh = false;
+static bool subaru_stop_start = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -243,6 +255,32 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     violation |= (!cruise_cancel);
   }
 
+  // Auto Vehicle Hold. openpilot asks for this once while parked at the start of a drive,
+  // so both gates below cost it nothing and make the message inert on the road.
+  if (msg->addr == MSG_SUBARU_Comfort_Control) {
+    // 1 is off, 2 is on, 0 is the idle frame. bytes 3 to 7 are the steady state the car
+    // sends with the engine running, pinned here so openpilot can send this one frame and
+    // no other. whatever else this message carries stays out of reach.
+    const bool valid_request = (msg->data[2] == 0U) || (msg->data[2] == 1U) || (msg->data[2] == 2U);
+    const bool valid_static = (msg->data[3] == 0x01U) && (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
+                              (msg->data[6] == 0x0EU) && (msg->data[7] == 0x00U);
+    violation |= !subaru_avh;
+    violation |= vehicle_moving;
+    violation |= !valid_request;
+    violation |= !valid_static;
+  }
+
+  // Auto start-stop engine shutoff. This one is the dash button rather than a state, so a
+  // frame without the button bit set would just be openpilot competing with the car's own
+  // copy of a message it has no business sending.
+  if (msg->addr == MSG_SUBARU_Dashlights) {
+    // Signal: Dashlights.STOP_START
+    const bool stop_start_pressed = GET_BIT(msg, 54U);
+    violation |= !subaru_stop_start;
+    violation |= vehicle_moving;
+    violation |= !stop_start_pressed;
+  }
+
   if (violation) {
     tx = false;
   }
@@ -271,12 +309,15 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
     SUBARU_LKAS_ALERT_TX_MSGS()
+    SUBARU_COMFORT_TX_MSGS(SUBARU_ALT_BUS)
   };
 
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
   const uint16_t SUBARU_PARAM_MADS = 16;
   const uint16_t SUBARU_PARAM_MADS_MAIN = 32;
+  const uint16_t SUBARU_PARAM_AVH = 64;
+  const uint16_t SUBARU_PARAM_STOP_START = 128;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
@@ -296,6 +337,12 @@ static safety_config subaru_init(uint16_t param) {
 
   // arming off the main switch alone is an extension of MADS, so it inherits those refusals
   subaru_mads_main = subaru_mads && GET_FLAG(param, SUBARU_PARAM_MADS_MAIN);
+
+  // the comfort requests only exist on the alt bus of a gen2 angle car, which is the only
+  // place the messages were measured. everywhere else they stay refused whatever is asked.
+  const bool subaru_comfort_bus = subaru_lkas_angle && subaru_gen2;
+  subaru_avh = subaru_comfort_bus && GET_FLAG(param, SUBARU_PARAM_AVH);
+  subaru_stop_start = subaru_comfort_bus && GET_FLAG(param, SUBARU_PARAM_STOP_START);
   // assume the switch is already on, which it is with the car running
   subaru_main_on_prev = true;
 

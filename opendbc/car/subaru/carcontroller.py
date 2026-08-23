@@ -4,13 +4,22 @@ from opendbc.car import Bus, make_tester_present_msg
 from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
-from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags, \
+                                      is_avh_enabled, is_stop_start_off_enabled
 from opendbc.car.vehicle_model import VehicleModel
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
+
+# Comfort settings the car forgets every ignition cycle. Both requests are one shot: a short
+# burst while parked, only if the car is in the wrong state, then nothing for the rest of the
+# drive. Frames are 100 Hz.
+COMFORT_SETTLE_FRAMES = 500   # 5 s, long enough for every message we compare against to arrive
+COMFORT_DEADLINE_FRAMES = 6000  # 60 s, after which this stops being a start of drive action
+COMFORT_BURST_LEN = 8         # frames per request, matching a real button press
+COMFORT_BURST_STEP = 5        # 50 ms apart, also matching
 
 
 def get_safety_CP():
@@ -27,6 +36,15 @@ class CarController(CarControllerBase):
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
+
+    # one shot comfort requests: frames still to send, and whether this drive is finished
+    # with them either way. both start unfired and can only ever fire once.
+    self.avh_burst_left = 0
+    self.avh_counter = 0
+    self.avh_done = False
+    self.stop_start_burst_left = 0
+    self.stop_start_counter = 0
+    self.stop_start_done = False
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
@@ -162,6 +180,8 @@ class CarController(CarControllerBase):
         if self.frame % 2 == 0:
           can_sends.append(subarucan.create_es_static_2(self.packer))
 
+    can_sends += self.update_comfort(CS)
+
     new_actuators = actuators.as_builder()
     if self.CP.flags & SubaruFlags.LKAS_ANGLE:
       new_actuators.steeringAngleDeg = self.apply_angle_last
@@ -171,3 +191,68 @@ class CarController(CarControllerBase):
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def update_comfort(self, CS):
+    """Set Auto Vehicle Hold and the auto start-stop shutoff once, at the start of a drive.
+
+    The car forgets both every ignition cycle, so each request only ever pushes in the one
+    direction the driver had to push it by hand: AVH on, start-stop off. openpilot can never
+    switch AVH off or switch start-stop back on, which keeps a stuck state machine from
+    undoing something the driver just did on the touchscreen.
+    """
+    can_sends = []
+
+    avh_wanted = is_avh_enabled(self.CP)
+    stop_start_wanted = is_stop_start_off_enabled(self.CP)
+    if not (avh_wanted or stop_start_wanted):
+      return can_sends
+
+    # let the bus settle first, then give up if we never got a chance while parked. after the
+    # deadline this stops being a start of drive action, and surprising the driver with it
+    # mid drive is worse than not doing it at all.
+    if self.frame < COMFORT_SETTLE_FRAMES:
+      return can_sends
+    if self.frame > COMFORT_DEADLINE_FRAMES:
+      self.avh_done = True
+      self.stop_start_done = True
+      return can_sends
+
+    # neither setting means anything while rolling, and the panda refuses both anyway
+    if not CS.out.standstill:
+      return can_sends
+
+    # *** auto vehicle hold ***
+    if avh_wanted and not self.avh_done:
+      if self.avh_burst_left == 0 and CS.avh_active is False:
+        self.avh_burst_left = COMFORT_BURST_LEN
+      if self.avh_burst_left > 0:
+        if self.frame % COMFORT_BURST_STEP == 0:
+          self.avh_counter += 1
+          # 2 is the on request. the car answers on Comfort_Status about 90 ms later
+          can_sends.append(subarucan.create_comfort_control(self.packer, self.avh_counter, 2))
+          self.avh_burst_left -= 1
+          if self.avh_burst_left == 0:
+            self.avh_done = True
+      elif CS.avh_active:
+        # already on, nothing to ask for
+        self.avh_done = True
+
+    # *** auto start-stop engine shutoff ***
+    # this one is a button press rather than a state, so it toggles. only ever send it when
+    # the shutoff is still armed, or it would switch the thing back on.
+    if stop_start_wanted and not self.stop_start_done and CS.dashlights_msg is not None:
+      if self.stop_start_burst_left == 0 and CS.stop_start_disabled is False:
+        self.stop_start_burst_left = COMFORT_BURST_LEN
+        self.stop_start_counter = int(CS.dashlights_msg["COUNTER"])
+      if self.stop_start_burst_left > 0:
+        if self.frame % COMFORT_BURST_STEP == 0:
+          self.stop_start_counter += 1
+          can_sends.append(subarucan.create_stop_start_press(self.packer, self.stop_start_counter,
+                                                             CS.dashlights_msg))
+          self.stop_start_burst_left -= 1
+          if self.stop_start_burst_left == 0:
+            self.stop_start_done = True
+      elif CS.stop_start_disabled:
+        self.stop_start_done = True
+
+    return can_sends

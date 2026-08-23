@@ -362,6 +362,53 @@ def create_preglobal_es_distance(packer, cruise_button, es_distance_msg):
   return packer.make_can_msg("ES_Distance", CanBus.main, values)
 
 
+def create_comfort_control(packer, counter, avh_request):
+  """Ask the car to switch Auto Vehicle Hold on or off.
+
+  1 is off, 2 is on, 0 is the idle frame the car sends the rest of the time. The trailing
+  constants are the steady state measured with the engine running; the panda checks for
+  exactly these, so openpilot can send this one frame and nothing else.
+  """
+  values = {
+    "COUNTER": counter & 0xF,
+    "AVH_REQUEST": avh_request,
+    "Signal2": 0x01,
+    "Signal5": 0x0e,
+  }
+  return packer.make_can_msg("Comfort_Control", CanBus.alt, values)
+
+
+def create_stop_start_press(packer, counter, dashlights_msg):
+  """Fake one press of the auto start-stop button on the dash.
+
+  This is a momentary press, not a state: the car toggles on the rising edge. Everything
+  except the button bit is copied from the car's own frame, so the blinker and seatbelt
+  bits this message also carries stay truthful.
+  """
+  values = {s: dashlights_msg[s] for s in [
+    "Signal1",
+    "Signal2",
+    "UNITS",
+    "Signal3",
+    "ICY_ROAD",
+    "Signal4",
+    "Signal5",
+    "SEATBELT_FL",
+    "Signal6",
+    "LEFT_BLINKER",
+    "RIGHT_BLINKER",
+    "Signal7",
+    "STOP_START",
+    "Signal8",
+    "Signal9",
+  ]}
+
+  values["COUNTER"] = counter & 0xF
+  values["STOP_START"] = 1
+
+  return packer.make_can_msg("Dashlights", CanBus.alt, values)
+
+
 def subaru_checksum(address: int, sig, d: bytearray) -> int:
   s = 0
   addr = address
