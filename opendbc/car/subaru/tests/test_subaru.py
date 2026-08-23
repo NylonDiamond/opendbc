@@ -5,7 +5,8 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.structs import CarControl
 from opendbc.car.subaru import subarucan
-from opendbc.car.subaru.carcontroller import CarController, COMFORT_BURST_LEN, COMFORT_DEADLINE_FRAMES, COMFORT_SETTLE_FRAMES
+from opendbc.car.subaru.carcontroller import CarController, COMFORT_BURST_LEN, COMFORT_DEADLINE_FRAMES, \
+                                             COMFORT_PRESS_FRAMES, COMFORT_PRESS_TRIES, COMFORT_SETTLE_FRAMES
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.carstate import MadsLatch
 from opendbc.car.subaru.values import CAR, CanBus, DBC, SubaruSafetyFlags, enable_avh, enable_mads, enable_mads_main, \
@@ -222,6 +223,47 @@ DASHLIGHTS_TEMPLATE = {"CHECKSUM": 0, "COUNTER": 3, "Signal1": 0, "Signal2": 0x1
                        "Signal7": 0, "STOP_START": 0, "Signal8": 0, "Signal9": 0}
 
 
+class FakeStopStartCar(FakeCarState):
+  """A car that answers the start-stop button the way route 00000334 shows this one does.
+
+  Dashlights goes out at 10 Hz with the button bit clear, and every one of those clear frames
+  reads as a release. So the setting toggles once for each gap between the car's own frames
+  that carries a press, no matter how many press frames landed in it. That is what turned an
+  eight frame burst 50 ms apart into four presses and left the setting exactly where it
+  started, which is the bug this models.
+  """
+  dashlights_msg: dict  # this car always has a frame to copy, unlike the bare fake above
+
+  CAR_PERIOD = 10   # control frames between the car's own Dashlights frames, 100 Hz vs 10 Hz
+  ANSWER_DELAY = 3  # control frames before Engine_Stop_Start carries the new state, ~30 ms measured
+
+  def __init__(self, disabled=False, **kwargs):
+    super().__init__(stop_start_disabled=disabled, **kwargs)
+    self.dashlights_msg = dict(DASHLIGHTS_TEMPLATE)
+    self.presses = 0
+    self.gap_pressed = False
+    self.deaf = False  # a car that counts presses but never acts on them
+    self.answer_in = None
+    self.tick = 0
+
+  def step(self, sent):
+    if any(addr == 0x390 for addr, _, _ in sent):
+      self.gap_pressed = True
+    self.tick += 1
+    if self.answer_in is not None:
+      self.answer_in -= 1
+      if self.answer_in == 0:
+        self.stop_start_disabled = not self.stop_start_disabled
+        self.answer_in = None
+    if self.tick % self.CAR_PERIOD == 0:
+      if self.gap_pressed:
+        self.presses += 1
+        if not self.deaf:
+          self.answer_in = self.ANSWER_DELAY
+        self.gap_pressed = False
+      self.dashlights_msg["COUNTER"] = (self.dashlights_msg["COUNTER"] + 1) % 16
+
+
 class TestSubaruComfort(unittest.TestCase):
   """Auto Vehicle Hold and the auto start-stop shutoff are one shot requests.
 
@@ -244,7 +286,10 @@ class TestSubaruComfort(unittest.TestCase):
     sent = []
     CC.frame = start
     for _ in range(frames):
-      sent += CC.update_comfort(CS)
+      step = CC.update_comfort(CS)
+      sent += step
+      if isinstance(CS, FakeStopStartCar):
+        CS.step(step)
       CC.frame += 1
     return sent
 
@@ -275,10 +320,10 @@ class TestSubaruComfort(unittest.TestCase):
     self.assertEqual([], self._run(CC, FakeCarState(avh_active=None)))
 
   def test_stop_start_presses_once_when_armed(self):
+    car = FakeStopStartCar(disabled=False)
     CC = self._controller(stop_start=True)
-    sent = self._run(CC, FakeCarState(stop_start_disabled=False))
-    self.assertEqual(COMFORT_BURST_LEN, len(sent))
-    counters = []
+    sent = self._run(CC, car)
+    self.assertEqual(COMFORT_PRESS_FRAMES, len(sent))
     for addr, dat, bus in sent:
       dat = bytes(dat)
       self.assertEqual(0x390, addr)
@@ -287,8 +332,58 @@ class TestSubaruComfort(unittest.TestCase):
       # everything else is copied from the car's own frame, so the blinker and seatbelt bits stay true
       self.assertEqual(0x11, dat[2])
       self.assertEqual(1, dat[6] & 0x1)
-      counters.append(dat[1] & 0xF)
-    self.assertEqual([(4 + i) % 16 for i in range(COMFORT_BURST_LEN)], counters)
+      self.assertEqual((addr % 256 + addr // 256 + sum(dat[1:])) & 0xFF, dat[0])
+
+  def test_stop_start_lands_as_exactly_one_press(self):
+    # the regression. a press that straddles one of the car's own frames is two presses, and
+    # an even number of presses leaves the shutoff exactly where it started.
+    car = FakeStopStartCar(disabled=False)
+    CC = self._controller(stop_start=True)
+    self._run(CC, car)
+    self.assertEqual(1, car.presses, "the car has to see one press, not a train of them")
+    self.assertTrue(car.stop_start_disabled, "the shutoff has to end up off")
+
+  def test_stop_start_lands_as_one_press_from_any_phase(self):
+    # a two frame press only reads as one edge if it sits between two of the car's own
+    # frames, so it is started off the car's counter rather than whenever we happen to be
+    for phase in range(FakeStopStartCar.CAR_PERIOD):
+      car = FakeStopStartCar(disabled=False)
+      for _ in range(phase):
+        car.step([])
+      CC = self._controller(stop_start=True)
+      self._run(CC, car)
+      self.assertEqual(1, car.presses, f"{phase=}")
+      self.assertTrue(car.stop_start_disabled, f"{phase=}")
+
+  def test_stop_start_leaves_the_driver_alone_afterwards(self):
+    # once the shutoff is off this is finished for the drive. a driver who presses the button
+    # back on has to win, so a re-armed shutoff is never pressed a second time.
+    car = FakeStopStartCar(disabled=False)
+    CC = self._controller(stop_start=True)
+    self._run(CC, car)
+    self.assertTrue(car.stop_start_disabled)
+    car.presses = 0
+    car.stop_start_disabled = False
+    self.assertEqual([], self._run(CC, car, start=CC.frame))
+    self.assertEqual(0, car.presses)
+
+  def test_stop_start_gives_up_after_a_few_tries(self):
+    # the result is checked rather than assumed, so a press that does not land is repeated.
+    # a car that never answers gets a bounded number of tries and is then left alone.
+    car = FakeStopStartCar(disabled=False)
+    car.deaf = True
+    CC = self._controller(stop_start=True)
+    sent = self._run(CC, car)
+    self.assertEqual(COMFORT_PRESS_TRIES, car.presses)
+    self.assertEqual(COMFORT_PRESS_TRIES * COMFORT_PRESS_FRAMES, len(sent))
+    self.assertFalse(car.stop_start_disabled)
+
+  def test_stop_start_counter_follows_the_car(self):
+    car = FakeStopStartCar(disabled=False)
+    CC = self._controller(stop_start=True)
+    sent = self._run(CC, car)
+    counters = [bytes(dat)[1] & 0xF for _, dat, _ in sent]
+    self.assertEqual([(counters[0] + i) % 16 for i in range(len(counters))], counters)
 
   def test_stop_start_says_nothing_when_already_off(self):
     CC = self._controller(stop_start=True)
@@ -308,9 +403,9 @@ class TestSubaruComfort(unittest.TestCase):
     # openpilot is often still starting up as the driver pulls away, and this button touches
     # nothing but the engine's own idle stop, so it does not wait for a standstill
     CC = self._controller(stop_start=True)
-    CS = FakeCarState(standstill=False, stop_start_disabled=False)
-    sent = self._run(CC, CS)
-    self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x390]))
+    car = FakeStopStartCar(disabled=False, standstill=False)
+    self._run(CC, car)
+    self.assertTrue(car.stop_start_disabled)
 
   def test_nothing_before_the_bus_settles(self):
     CC = self._controller(avh=True, stop_start=True)
@@ -328,9 +423,11 @@ class TestSubaruComfort(unittest.TestCase):
 
   def test_both_ask_together(self):
     CC = self._controller(avh=True, stop_start=True)
-    sent = self._run(CC, FakeCarState(avh_active=False, stop_start_disabled=False))
+    car = FakeStopStartCar(disabled=False, avh_active=False)
+    sent = self._run(CC, car)
     self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x6bb]))
-    self.assertEqual(COMFORT_BURST_LEN, len([m for m in sent if m[0] == 0x390]))
+    self.assertEqual(COMFORT_PRESS_FRAMES, len([m for m in sent if m[0] == 0x390]))
+    self.assertTrue(car.stop_start_disabled)
 
 
 if __name__ == "__main__":
