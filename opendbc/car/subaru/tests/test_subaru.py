@@ -472,5 +472,47 @@ class TestSubaruComfort(unittest.TestCase):
     self.assertTrue(car.stop_start_disabled)
 
 
+class TestSubaruLowSpeedAngleFilter(unittest.TestCase):
+  """Low speed steering is smoothed by a low pass filter, not held still by a deadzone."""
+  PLATFORM = CAR.SUBARU_CROSSTREK_2024
+
+  def setUp(self):
+    CP = interfaces[self.PLATFORM].get_params(self.PLATFORM, {0: {}, 1: {}, 2: {}}, [], False, False, docs=False)
+    self.CI = interfaces[self.PLATFORM](CP.as_reader())
+    self.CI.update([])
+
+  def _steer(self, v_ego, target, frames, lat_active=True):
+    self.CI.CS.out.vEgo = self.CI.CS.out.vEgoRaw = v_ego
+    self.CI.CS.out.steeringAngleDeg = 0.0
+    CC = CarControl(enabled=True, latActive=lat_active)
+    CC.actuators.steeringAngleDeg = target
+    CC = CC.as_reader()
+    return [self.CI.CC.update(CC, self.CI.CS, 0)[0].steeringAngleDeg for _ in range(frames)]
+
+  def test_small_request_moves_the_wheel_at_low_speed(self):
+    # the old deadzone was 6 deg at this speed, so a 4 deg request never reached the wheel
+    out = self._steer(3.0, 4.0, 300)
+    self.assertGreater(out[0], 0.0)
+    self.assertAlmostEqual(4.0, out[-1], places=1)
+
+  def test_low_speed_request_ramps_in_without_jumping(self):
+    out = self._steer(3.0, 4.0, 300)
+    steps = [b - a for a, b in zip(out, out[1:], strict=False)]
+    self.assertTrue(all(s >= 0 for s in steps))
+    self.assertLess(max(steps), 0.5)
+
+  def test_low_speed_target_is_smoothed(self):
+    self._steer(3.0, 4.0, 1)
+    self.assertLess(self.CI.CC.angle_filter.x, 0.5)
+
+  def test_highway_target_is_not_smoothed(self):
+    self._steer(30.0, 4.0, 1)
+    self.assertEqual(4.0, self.CI.CC.angle_filter.x)
+
+  def test_filter_follows_the_request_while_disengaged(self):
+    self._steer(3.0, 12.0, 1, lat_active=False)
+    self.assertEqual(12.0, self.CI.CC.angle_filter.x)
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -1,7 +1,8 @@
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg
-from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg
+from opendbc.car.common.filter_simple import FirstOrderFilter
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags, \
@@ -68,6 +69,7 @@ class CarController(CarControllerBase):
 
     if CP.flags & SubaruFlags.LKAS_ANGLE:
       self.VM = VehicleModel(get_safety_CP())
+      self.angle_filter = FirstOrderFilter(0.0, 0.3, DT_CTRL)
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -77,14 +79,20 @@ class CarController(CarControllerBase):
     can_sends = []
 
     # *** steering ***
+    # The wheel oscillates at low speed. A center deadzone stopped that but held the wheel still
+    # until the target moved 3 to 6 deg, then jumped it there. A low pass filter smooths the target
+    # instead: 0.3 s up to 11 mph, 0.1 s at 22 mph, none from 45 mph up. Taken from commaai/opendbc#3795.
+    # It runs every frame, including those that send no steering message.
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      if CC.latActive:
+        self.angle_filter.update_alpha(float(np.interp(CS.out.vEgo, [5.0, 10.0, 20.0], [0.3, 0.1, 0.0])))
+        self.angle_filter.update(actuators.steeringAngleDeg)
+      else:
+        self.angle_filter.x = actuators.steeringAngleDeg
+
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
-        apply_angle = actuators.steeringAngleDeg
-        # heavy steering oscillation at low speeds (up to ~5 mph), still present up to ~22mph
-        # likely due to poor steering angle sensor resolution or imprecise EPS actuation
-        if CC.latActive and CS.out.vEgoRaw < 10.0:
-          deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
-          apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
+        apply_angle = self.angle_filter.x
         self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
                                                             CS.out.steeringAngleDeg, CC.latActive, CarControllerParams, self.VM)
         can_sends.append(subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, CC.latActive))
